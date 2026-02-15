@@ -1,0 +1,5 @@
+storage/cache/
+config/config.php
+.env
+.env.*
+*.log

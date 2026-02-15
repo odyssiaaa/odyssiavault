@@ -1,0 +1,6 @@
+config/config.php
+storage/cache/
+.vercel/
+.env
+.env.*
+!.env.example

@@ -1,0 +1,78 @@
+<?php
+return [
+    'app' => [
+        'name' => 'Odyssiavault',
+        'base_url' => 'http://localhost/dropshipper/public',
+        'session_name' => 'odyssiavault_session',
+        'session_save_path' => '',
+        'logo_path' => 'assets/logo.png',
+        'default_new_user_balance' => 0,
+    ],
+    'db' => [
+        'host' => '127.0.0.1',
+        'port' => 3306,
+        'database' => 'odyssiavault',
+        'username' => 'root',
+        'password' => '',
+        'charset' => 'utf8mb4',
+    ],
+    'provider' => [
+        'api_url' => 'https://buzzerpanel.id/api/json.php',
+        'api_key' => 'GANTI_DENGAN_API_KEY_ANDA',
+        'secret_key' => 'GANTI_DENGAN_SECRET_KEY_ANDA',
+        'timeout' => 30,
+        'request_content_type' => 'form',
+        'services_cache_ttl' => 300,
+        'services_mapped_cache_ttl' => 300,
+        'cache_dir' => '',
+        'services_mapped_cache_dir' => '',
+    ],
+    'pricing' => [
+        'default_markup_percent' => 35,
+        'fixed_markup' => 0,
+        'round_to' => 100,
+        'category_markup_percent' => [],
+    ],
+    'checkout' => [
+        'unpaid_timeout_minutes' => 180,
+        'payment_methods' => [
+            [
+                'code' => 'bca',
+                'name' => 'Bank BCA',
+                'account_name' => 'Odyssiavault',
+                'account_number' => 'ISI_REKENING_BCA',
+                'note' => 'Transfer sesuai total pesanan.',
+            ],
+            [
+                'code' => 'dana',
+                'name' => 'DANA',
+                'account_name' => 'Odyssiavault',
+                'account_number' => 'ISI_NOMOR_DANA',
+                'note' => 'Transfer sesuai total pesanan.',
+            ],
+            [
+                'code' => 'gopay',
+                'name' => 'GoPay',
+                'account_name' => 'Odyssiavault',
+                'account_number' => 'ISI_NOMOR_GOPAY',
+                'note' => 'Transfer sesuai total pesanan.',
+            ],
+        ],
+    ],
+    'payment' => [
+        'deposit_min' => 10000,
+        'deposit_max' => 10000000,
+        'qris_image' => 'assets/qris.png',
+        'qris_receiver_name' => 'Odyssiavault',
+        'use_unique_code' => true,
+        'unique_code_min' => 11,
+        'unique_code_max' => 99,
+    ],
+    'news' => [
+        // manual | provider_only | hybrid
+        'source_mode' => 'provider_only',
+        'provider_services_variant' => 'services_1',
+        'provider_limit' => 30,
+        'provider_note_chars' => 650,
+    ],
+];
