@@ -4,3 +4,4 @@ storage/cache/
 .env
 .env.*
 !.env.example
+*.rar
