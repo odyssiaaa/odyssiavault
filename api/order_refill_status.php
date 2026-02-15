@@ -1,5 +1,0 @@
-<?php
-
-declare(strict_types=1);
-
-require __DIR__ . '/../public/api/order_refill_status.php';

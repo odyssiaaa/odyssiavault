@@ -5,3 +5,5 @@ storage/cache/
 .env.*
 !.env.example
 *.rar
+
+.vercel
