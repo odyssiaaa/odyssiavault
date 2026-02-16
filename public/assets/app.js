@@ -437,7 +437,15 @@ function hideNotice(el) {
 }
 
 async function apiRequest(url, options = {}) {
-  const requestOptions = { credentials: 'same-origin', ...options };
+  const mergedHeaders = {
+    Accept: 'application/json',
+    ...(options.headers || {}),
+  };
+  const requestOptions = {
+    credentials: 'same-origin',
+    ...options,
+    headers: mergedHeaders,
+  };
   let response;
   try {
     response = await fetch(url, requestOptions);
@@ -447,12 +455,32 @@ async function apiRequest(url, options = {}) {
       data: { status: false, data: { msg: 'Tidak dapat terhubung ke server.' } },
     };
   }
-  let data;
-
+  const statusCode = Number(response.status || 0);
+  let rawBody = '';
   try {
-    data = await response.json();
+    rawBody = await response.text();
   } catch {
-    data = { status: false, data: { msg: 'Respon JSON server tidak valid.' } };
+    rawBody = '';
+  }
+
+  let data;
+  try {
+    data = rawBody ? JSON.parse(rawBody) : null;
+  } catch {
+    data = null;
+  }
+
+  if (!data || typeof data !== 'object') {
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    const looksHtml = contentType.includes('text/html') || rawBody.trim().startsWith('<!doctype') || rawBody.trim().startsWith('<html');
+    data = {
+      status: false,
+      data: {
+        msg: looksHtml
+          ? `Respon server bukan JSON (HTTP ${statusCode || '-'}).`
+          : `Respon JSON server tidak valid (HTTP ${statusCode || '-'}).`,
+      },
+    };
   }
 
   return { response, data };

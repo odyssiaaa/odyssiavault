@@ -6,6 +6,10 @@ const AUTH_SESSION_KEY = 'auth_user_id';
 
 function jsonResponse(array $payload, int $status = 200): void
 {
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+
     http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
@@ -20,8 +24,31 @@ function registerApiErrorHandlers(): void
     }
     $registered = true;
 
+    @ini_set('display_errors', '0');
+    @ini_set('html_errors', '0');
+    if (ob_get_level() === 0) {
+        ob_start();
+    }
+
+    set_error_handler(static function (
+        int $severity,
+        string $message,
+        string $file = '',
+        int $line = 0
+    ): bool {
+        if (!(error_reporting() & $severity)) {
+            return false;
+        }
+
+        throw new ErrorException($message, 0, $severity, $file, $line);
+    });
+
     set_exception_handler(static function (Throwable $e): void {
         error_log('Unhandled API exception: ' . $e->getMessage());
+
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
 
         if (!headers_sent()) {
             http_response_code(500);
@@ -48,6 +75,10 @@ function registerApiErrorHandlers(): void
 
         if (headers_sent()) {
             return;
+        }
+
+        while (ob_get_level() > 0) {
+            ob_end_clean();
         }
 
         http_response_code(500);
