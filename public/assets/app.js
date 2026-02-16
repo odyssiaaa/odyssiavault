@@ -2,6 +2,11 @@ const state = {
   user: null,
   stats: { total_orders: 0, total_spent: 0 },
   services: [],
+  serviceDirectory: {
+    categories: [],
+    categoryEntries: [],
+    byProviderCategoryId: new Map(),
+  },
   serviceIndex: {
     categories: [],
     categoryEntries: [],
@@ -13,8 +18,11 @@ const state = {
     globalSortedByPrice: [],
     byExactName: new Map(),
   },
+  selectedServiceId: 0,
   servicesLoaded: false,
   servicesLoadingPromise: null,
+  servicesSearchCache: new Map(),
+  servicesSearchRequestId: 0,
   topServices: [],
   topServicesLoaded: false,
   orders: [],
@@ -45,6 +53,11 @@ const state = {
     perPage: 50,
     page: 1,
   },
+  serviceCatalogRows: [],
+  serviceCatalogTotal: 0,
+  serviceCatalogTotalPages: 1,
+  serviceCatalogLoaded: false,
+  serviceCatalogRequestId: 0,
   hasTop5Data: false,
   currentView: 'dashboard',
 };
@@ -67,9 +80,10 @@ const CURRENCY_UNIT_FORMATTER = new Intl.NumberFormat('id-ID', {
 const ID_COLLATOR = new Intl.Collator('id', { sensitivity: 'base', numeric: true });
 
 const pageEl = document.querySelector('.page');
-const PANEL_VIEWS = new Set(['dashboard', 'top5', 'purchase', 'refill', 'deposit', 'ticket', 'services', 'pages', 'admin']);
+const PANEL_VIEWS = new Set(['dashboard', 'profile', 'top5', 'purchase', 'refill', 'deposit', 'ticket', 'services', 'pages', 'admin']);
 const LEGACY_VIEW_MAP = {
   dashboardsection: 'dashboard',
+  profilesection: 'profile',
   top5section: 'top5',
   ordersection: 'purchase',
   historysection: 'purchase',
@@ -99,6 +113,16 @@ const welcomeText = document.getElementById('welcomeText');
 const statBalance = document.getElementById('statBalance');
 const statOrders = document.getElementById('statOrders');
 const statSpent = document.getElementById('statSpent');
+const profileUsernameEl = document.getElementById('profileUsername');
+const profileRoleEl = document.getElementById('profileRole');
+const profileEmailEl = document.getElementById('profileEmail');
+const profileCreatedAtEl = document.getElementById('profileCreatedAt');
+const profileLastLoginAtEl = document.getElementById('profileLastLoginAt');
+const profileTotalSpentEl = document.getElementById('profileTotalSpent');
+const profileTotalOrdersEl = document.getElementById('profileTotalOrders');
+const profileWaitingOrdersEl = document.getElementById('profileWaitingOrders');
+const profileProcessingOrdersEl = document.getElementById('profileProcessingOrders');
+const profileCompletedOrdersEl = document.getElementById('profileCompletedOrders');
 
 const categoryInputEl = document.getElementById('categoryInput');
 const categoryOptionsEl = document.getElementById('categoryOptions');
@@ -446,6 +470,44 @@ function buildServiceIndex() {
   };
 }
 
+function buildServiceDirectory(categories) {
+  const normalized = Array.isArray(categories) ? categories : [];
+  const byProviderCategoryId = new Map();
+  const seenNames = new Set();
+  const entries = [];
+
+  normalized.forEach((category) => {
+    const name = String(category?.name || '').trim();
+    if (!name || seenNames.has(name)) {
+      return;
+    }
+    seenNames.add(name);
+
+    const providerIdNum = Number(category?.provider_cat_id || 0);
+    const providerIdText = providerIdNum > 0 ? String(providerIdNum) : '';
+
+    if (providerIdNum > 0 && !byProviderCategoryId.has(providerIdNum)) {
+      byProviderCategoryId.set(providerIdNum, name);
+    }
+
+    entries.push({
+      name,
+      norm: normalizeQuery(name),
+      providerIdNum,
+      providerIdText,
+      searchable: `${normalizeQuery(name)} ${providerIdText}`.trim(),
+    });
+  });
+
+  entries.sort((a, b) => ID_COLLATOR.compare(a.name, b.name));
+
+  state.serviceDirectory = {
+    categories: entries.map((item) => item.name),
+    categoryEntries: entries,
+    byProviderCategoryId,
+  };
+}
+
 function normalizePanelView(value) {
   const normalized = String(value || '').trim().toLowerCase();
   const mapped = LEGACY_VIEW_MAP[normalized] || normalized;
@@ -672,10 +734,27 @@ function updateHeaderStats() {
   }
 }
 
+function updateProfilePanel() {
+  const user = state.user || null;
+  const stats = state.stats || {};
+
+  if (profileUsernameEl) profileUsernameEl.textContent = user?.username ? `@${user.username}` : '-';
+  if (profileRoleEl) profileRoleEl.textContent = user?.role || '-';
+  if (profileEmailEl) profileEmailEl.textContent = user?.email || '-';
+  if (profileCreatedAtEl) profileCreatedAtEl.textContent = user?.created_at ? formatDateTime(user.created_at) : '-';
+  if (profileLastLoginAtEl) profileLastLoginAtEl.textContent = user?.last_login_at ? formatDateTime(user.last_login_at) : '-';
+  if (profileTotalSpentEl) profileTotalSpentEl.textContent = rupiah(stats.total_spent || 0);
+  if (profileTotalOrdersEl) profileTotalOrdersEl.textContent = formatInteger(stats.total_orders || 0);
+  if (profileWaitingOrdersEl) profileWaitingOrdersEl.textContent = formatInteger(stats.waiting_orders || 0);
+  if (profileProcessingOrdersEl) profileProcessingOrdersEl.textContent = formatInteger(stats.processing_orders || 0);
+  if (profileCompletedOrdersEl) profileCompletedOrdersEl.textContent = formatInteger(stats.completed_orders || 0);
+}
+
 async function fetchSession() {
   const { data } = await apiRequest('./api/auth_me.php');
   if (!data.status) {
     state.user = null;
+    updateProfilePanel();
     setViewLoggedIn(false);
     return false;
   }
@@ -683,61 +762,51 @@ async function fetchSession() {
   state.user = data.data.user;
   state.stats = data.data.stats || { total_orders: 0, total_spent: 0 };
   updateHeaderStats();
+  updateProfilePanel();
   setViewLoggedIn(true);
   return true;
 }
 
 function selectedService() {
-  if (!serviceInputEl) return null;
-
-  const inputValue = String(serviceInputEl.value || '').trim();
-  if (!inputValue) return null;
-
   const byServiceId = state.serviceIndex?.byServiceId instanceof Map
     ? state.serviceIndex.byServiceId
     : new Map();
 
+  if (Number.isFinite(state.selectedServiceId) && state.selectedServiceId > 0) {
+    const selected = byServiceId.get(state.selectedServiceId);
+    if (selected) {
+      return selected;
+    }
+  }
+
+  if (!serviceInputEl) return null;
+  const inputValue = String(serviceInputEl.value || '').trim();
+  if (!inputValue) return null;
+
   const byIdMatch = inputValue.match(/^#?\s*(\d+)/);
   if (byIdMatch) {
     const serviceId = Number(byIdMatch[1] || 0);
-    if (serviceId > 0) {
+    if (serviceId > 0 && byServiceId.has(serviceId)) {
+      state.selectedServiceId = serviceId;
       return byServiceId.get(serviceId) || null;
     }
   }
 
   const normalizedInput = normalizeQuery(inputValue);
-  if (!normalizedInput) return null;
+  if (!normalizedInput) {
+    state.selectedServiceId = 0;
+    return null;
+  }
 
-  const activeCategory = getSelectedCategoryName();
-  const byCategorySortedByPrice = state.serviceIndex?.byCategorySortedByPrice instanceof Map
-    ? state.serviceIndex.byCategorySortedByPrice
-    : new Map();
-  const globalSortedByPrice = Array.isArray(state.serviceIndex?.globalSortedByPrice)
-    ? state.serviceIndex.globalSortedByPrice
-    : [];
-  const byExactName = state.serviceIndex?.byExactName instanceof Map
-    ? state.serviceIndex.byExactName
-    : new Map();
-
-  const exactByName = byExactName.get(normalizedInput) || null;
-  if (exactByName) {
-    if (!activeCategory || (exactByName.category || 'Lainnya') === activeCategory) {
-      return exactByName;
+  for (const service of byServiceId.values()) {
+    const label = normalizeQuery(serviceOptionLabel(service));
+    if (label === normalizedInput) {
+      state.selectedServiceId = Number(service.id || 0);
+      return service;
     }
   }
 
-  const pool = activeCategory
-    ? (byCategorySortedByPrice.get(activeCategory) || [])
-    : globalSortedByPrice;
-
-  for (let i = 0; i < pool.length; i += 1) {
-    const item = pool[i];
-    const itemText = String(item?.__searchNorm || '');
-    if (itemText.includes(normalizedInput)) {
-      return item;
-    }
-  }
-
+  state.selectedServiceId = 0;
   return null;
 }
 
@@ -752,7 +821,7 @@ function getSelectedCategoryName() {
   const raw = String(categoryInputEl.value || '').trim();
   if (!raw) return '';
 
-  const categories = Array.isArray(state.serviceIndex?.categories) ? state.serviceIndex.categories : [];
+  const categories = Array.isArray(state.serviceDirectory?.categories) ? state.serviceDirectory.categories : [];
   const normalizedRaw = normalizeQuery(raw);
   const exact = categories.find((category) => normalizeQuery(category) === normalizedRaw);
   if (exact) return exact;
@@ -763,20 +832,12 @@ function getSelectedCategoryName() {
   const inputId = Number(idMatch[1] || 0);
   if (!Number.isFinite(inputId) || inputId <= 0) return '';
 
-  const byProviderCategoryId = state.serviceIndex?.byProviderCategoryId instanceof Map
-    ? state.serviceIndex.byProviderCategoryId
-    : new Map();
-  const byServiceId = state.serviceIndex?.byServiceId instanceof Map
-    ? state.serviceIndex.byServiceId
+  const byProviderCategoryId = state.serviceDirectory?.byProviderCategoryId instanceof Map
+    ? state.serviceDirectory.byProviderCategoryId
     : new Map();
 
   if (byProviderCategoryId.has(inputId)) {
     return byProviderCategoryId.get(inputId) || '';
-  }
-
-  const service = byServiceId.get(inputId);
-  if (service && typeof service === 'object') {
-    return service.category || 'Lainnya';
   }
 
   return '';
@@ -855,13 +916,10 @@ function updateCommentVisibility(service) {
 }
 
 function renderServicesCatalog() {
-  if (!servicesCatalogBodyEl || !serviceCatalogCategoryEl || !servicesCatalogSummaryEl) return;
+  if (!servicesCatalogBodyEl || !servicesCatalogSummaryEl) return;
 
-  const query = normalizeQuery(state.serviceCatalog.query);
-  const categoryFilter = String(state.serviceCatalog.category || '').trim();
   const sortBy = String(state.serviceCatalog.sortBy || 'category_name');
   const sortDir = String(state.serviceCatalog.sortDir || 'asc') === 'desc' ? 'desc' : 'asc';
-  const sortMultiplier = sortDir === 'desc' ? -1 : 1;
 
   if (serviceCatalogSortByEl && serviceCatalogSortByEl.value !== sortBy) {
     serviceCatalogSortByEl.value = sortBy;
@@ -871,82 +929,14 @@ function renderServicesCatalog() {
     serviceCatalogSortDirEl.value = sortDir;
   }
 
-  let filtered = state.services.filter((service) => {
-    const serviceCategory = service.category || 'Lainnya';
-    if (categoryFilter && serviceCategory !== categoryFilter) {
-      return false;
-    }
+  const rows = Array.isArray(state.serviceCatalogRows) ? state.serviceCatalogRows : [];
+  const total = Number(state.serviceCatalogTotal || 0);
+  const totalPages = Math.max(1, Number(state.serviceCatalogTotalPages || 1));
+  const currentPage = Math.max(1, Number(state.serviceCatalog.page || 1));
 
-    if (!query) {
-      return true;
-    }
+  servicesCatalogSummaryEl.textContent = `Menampilkan ${rows.length} dari ${total} layanan (halaman ${currentPage}/${totalPages}).`;
 
-    const text = String(service.__searchNorm || `${service.name || ''} ${serviceCategory} ${service.note || ''}`.toLowerCase());
-    return text.includes(query);
-  });
-
-  const defaultTieBreaker = (a, b) => {
-    const categoryCompare = ID_COLLATOR.compare(String(a.category || ''), String(b.category || ''));
-    if (categoryCompare !== 0) return categoryCompare;
-
-    const nameCompare = ID_COLLATOR.compare(String(a.name || ''), String(b.name || ''));
-    if (nameCompare !== 0) return nameCompare;
-
-    return (a.__idNum || Number(a.id || 0) || 0) - (b.__idNum || Number(b.id || 0) || 0);
-  };
-
-  filtered = filtered.sort((a, b) => {
-    let result = 0;
-
-    switch (sortBy) {
-      case 'price':
-        result = (a.__priceNum || 0) - (b.__priceNum || 0);
-        break;
-      case 'id':
-        result = (a.__idNum || 0) - (b.__idNum || 0);
-        break;
-      case 'name':
-        result = ID_COLLATOR.compare(String(a.name || ''), String(b.name || ''));
-        break;
-      case 'min':
-        result = (a.__minNum || 0) - (b.__minNum || 0);
-        break;
-      case 'max':
-        result = (a.__maxNum || 0) - (b.__maxNum || 0);
-        break;
-      case 'category_name':
-      default:
-        result = ID_COLLATOR.compare(String(a.category || ''), String(b.category || ''));
-        if (result === 0) {
-          result = ID_COLLATOR.compare(String(a.name || ''), String(b.name || ''));
-        }
-        break;
-    }
-
-    if (result === 0) {
-      result = defaultTieBreaker(a, b);
-    }
-
-    return result * sortMultiplier;
-  });
-
-  const perPage = Math.max(1, Number(state.serviceCatalog.perPage || 50));
-  const total = filtered.length;
-  const totalPages = Math.max(1, Math.ceil(total / perPage));
-
-  if (state.serviceCatalog.page > totalPages) {
-    state.serviceCatalog.page = totalPages;
-  }
-  if (state.serviceCatalog.page < 1) {
-    state.serviceCatalog.page = 1;
-  }
-
-  const start = (state.serviceCatalog.page - 1) * perPage;
-  const paged = filtered.slice(start, start + perPage);
-
-  servicesCatalogSummaryEl.textContent = `Menampilkan ${paged.length} dari ${total} layanan (halaman ${state.serviceCatalog.page}/${totalPages}).`;
-
-  if (!paged.length) {
+  if (!rows.length) {
     servicesCatalogBodyEl.innerHTML = '<tr><td colspan="6">Tidak ada layanan sesuai filter.</td></tr>';
     if (servicesCatalogPaginationEl) {
       servicesCatalogPaginationEl.innerHTML = '';
@@ -954,12 +944,12 @@ function renderServicesCatalog() {
     return;
   }
 
-  servicesCatalogBodyEl.innerHTML = paged.map((service) => `
+  servicesCatalogBodyEl.innerHTML = rows.map((service) => `
     <tr>
       <td>#${escapeHtml(service.id)}</td>
       <td>${escapeHtml(service.name || '-')}</td>
       <td>${escapeHtml(service.category || '-')}</td>
-      <td>${rupiah(service.sell_price_per_1000 || service.sell_price || 0)}</td>
+      <td>${rupiah(service.sell_price || 0)}</td>
       <td>${formatInteger(service.min || 0)}</td>
       <td>${formatInteger(service.max || 0)}</td>
     </tr>
@@ -969,7 +959,7 @@ function renderServicesCatalog() {
     if (totalPages <= 1) {
       servicesCatalogPaginationEl.innerHTML = '';
     } else {
-      const current = state.serviceCatalog.page;
+      const current = currentPage;
       const candidates = [1, current - 2, current - 1, current, current + 1, current + 2, totalPages]
         .filter((page) => page >= 1 && page <= totalPages);
       const uniquePages = [...new Set(candidates)].sort((a, b) => a - b);
@@ -997,7 +987,7 @@ function renderServicesCatalog() {
 function populateServiceCatalogCategoryOptions() {
   if (!serviceCatalogCategoryEl) return;
 
-  const categories = Array.isArray(state.serviceIndex?.categories) ? state.serviceIndex.categories : [];
+  const categories = Array.isArray(state.serviceDirectory?.categories) ? state.serviceDirectory.categories : [];
   const html = [
     '<option value="">Semua Kategori</option>',
     ...categories.map((category) => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`),
@@ -1106,25 +1096,16 @@ function fillCategoryOptions() {
   const query = normalizeQuery(rawInput);
   const idQuery = rawInput.replace(/\D+/g, '');
   const idQueryNum = Number(idQuery || 0);
-  const categoryEntries = Array.isArray(state.serviceIndex?.categoryEntries)
-    ? state.serviceIndex.categoryEntries
+  const categoryEntries = Array.isArray(state.serviceDirectory?.categoryEntries)
+    ? state.serviceDirectory.categoryEntries
     : [];
-  const byProviderCategoryId = state.serviceIndex?.byProviderCategoryId instanceof Map
-    ? state.serviceIndex.byProviderCategoryId
-    : new Map();
-  const byServiceId = state.serviceIndex?.byServiceId instanceof Map
-    ? state.serviceIndex.byServiceId
+  const byProviderCategoryId = state.serviceDirectory?.byProviderCategoryId instanceof Map
+    ? state.serviceDirectory.byProviderCategoryId
     : new Map();
 
   let priorityCategory = '';
   if (idQueryNum > 0) {
     priorityCategory = String(byProviderCategoryId.get(idQueryNum) || '');
-    if (!priorityCategory) {
-      const serviceFromId = byServiceId.get(idQueryNum);
-      if (serviceFromId && typeof serviceFromId === 'object') {
-        priorityCategory = String(serviceFromId.category || '');
-      }
-    }
   }
 
   const exactMatches = [];
@@ -1182,8 +1163,9 @@ function fillCategoryOptions() {
   fillServiceOptions();
 }
 
-function fillServiceOptions() {
+async function fillServiceOptions(options = {}) {
   if (!serviceInputEl || !serviceOptionsEl) return;
+  const force = !!options.force;
 
   const category = getSelectedCategoryName();
   const currentService = selectedService();
@@ -1193,60 +1175,63 @@ function fillServiceOptions() {
 
   if (!currentServiceMatchesCategory) {
     serviceInputEl.value = '';
+    state.selectedServiceId = 0;
   }
 
-  const serviceQuery = normalizeQuery(serviceInputEl.value);
-  const byCategorySortedByPrice = state.serviceIndex?.byCategorySortedByPrice instanceof Map
-    ? state.serviceIndex.byCategorySortedByPrice
-    : new Map();
-  const globalSortedByPrice = Array.isArray(state.serviceIndex?.globalSortedByPrice)
-    ? state.serviceIndex.globalSortedByPrice
-    : [];
-
-  const basePool = category
-    ? (byCategorySortedByPrice.get(category) || [])
-    : (serviceQuery ? globalSortedByPrice : []);
-
-  const idQuery = serviceQuery.replace(/\D+/g, '');
-  const prioritized = [];
-  const startsWithMatches = [];
-  const includesMatches = [];
-  const others = [];
-
-  if (!serviceQuery) {
-    for (let i = 0; i < basePool.length; i += 1) {
-      others.push(basePool[i]);
-      if (others.length >= MAX_SERVICE_OPTIONS) {
-        break;
-      }
-    }
-  } else {
-    for (let i = 0; i < basePool.length; i += 1) {
-      const service = basePool[i];
-      const text = String(service?.__searchNorm || '');
-      const idText = String(service?.__idNum || '');
-
-      if (idQuery && idText === idQuery) {
-        prioritized.push(service);
-        continue;
-      }
-
-      if (text.startsWith(serviceQuery)) {
-        startsWithMatches.push(service);
-        continue;
-      }
-
-      if (text.includes(serviceQuery)) {
-        includesMatches.push(service);
-        continue;
-      }
-
-      others.push(service);
-    }
+  const rawServiceInput = String(serviceInputEl.value || '').trim();
+  const serviceIdMatch = rawServiceInput.match(/^#?\s*(\d+)/);
+  const serviceQuery = serviceIdMatch
+    ? String(serviceIdMatch[1] || '').trim()
+    : normalizeQuery(rawServiceInput);
+  if (!category && !serviceQuery) {
+    state.services = [];
+    buildServiceIndex();
+    serviceOptionsEl.innerHTML = '';
+    updateServiceInfo();
+    return;
   }
 
-  const orderedServices = [...prioritized, ...startsWithMatches, ...includesMatches, ...others];
-  const limitedServices = orderedServices.slice(0, MAX_SERVICE_OPTIONS);
+  const cacheKey = `${category || '__all__'}::${serviceQuery}`;
+  let nextServices = (!force && state.servicesSearchCache.has(cacheKey))
+    ? (state.servicesSearchCache.get(cacheKey) || [])
+    : null;
+
+  if (!Array.isArray(nextServices)) {
+    const requestId = ++state.servicesSearchRequestId;
+    const params = new URLSearchParams({
+      mode: 'search',
+      variant: 'services',
+      q: serviceQuery,
+      limit: String(MAX_SERVICE_OPTIONS),
+    });
+    if (category) {
+      params.set('category', category);
+    }
+    const { data } = await apiRequest(`./api/services.php?${params.toString()}`);
+    if (requestId !== state.servicesSearchRequestId) {
+      return;
+    }
+
+    if (!data?.status) {
+      state.services = [];
+      buildServiceIndex();
+      serviceOptionsEl.innerHTML = '';
+      state.selectedServiceId = 0;
+      if (serviceInfoEl) {
+        serviceInfoEl.textContent = data?.data?.msg || 'Daftar layanan sedang tidak tersedia.';
+      }
+      updateServiceInfo();
+      return;
+    }
+
+    nextServices = Array.isArray(data.data?.services) ? data.data.services : [];
+    state.servicesSearchCache.set(cacheKey, nextServices);
+  }
+
+  state.services = [...nextServices];
+  buildServiceIndex();
+  const pool = Array.isArray(state.services) ? state.services : [];
+  const limitedServices = pool.slice(0, MAX_SERVICE_OPTIONS);
 
   serviceOptionsEl.innerHTML = limitedServices
     .map((service) => `<option value="${escapeHtml(serviceOptionLabel(service))}"></option>`)
@@ -1301,7 +1286,7 @@ function updateServiceInfo() {
 async function loadServices(options = {}) {
   const force = !!options.force;
 
-  if (!force && state.servicesLoaded && state.services.length) {
+  if (!force && state.servicesLoaded && state.serviceDirectory.categories.length) {
     return true;
   }
 
@@ -1310,30 +1295,22 @@ async function loadServices(options = {}) {
   }
 
   state.servicesLoadingPromise = (async () => {
-    serviceInfoEl.textContent = 'Memuat layanan provider...';
-
-    const variants = ['services', 'services_1', 'services2', 'services3'];
-    let data = null;
-
-    for (const variant of variants) {
-      const endpoint = force
-        ? `./api/services.php?variant=${encodeURIComponent(variant)}&_t=${Date.now()}`
-        : `./api/services.php?variant=${encodeURIComponent(variant)}`;
-      const response = await apiRequest(endpoint);
-      const candidate = response.data;
-      if (!candidate?.status) {
-        continue;
-      }
-
-      const list = Array.isArray(candidate.data) ? candidate.data : [];
-      if (list.length > 0) {
-        data = candidate;
-        break;
-      }
+    if (serviceInfoEl) {
+      serviceInfoEl.textContent = 'Memuat kategori layanan...';
     }
+
+    const endpoint = force
+      ? `./api/services.php?mode=categories&variant=services&_t=${Date.now()}`
+      : './api/services.php?mode=categories&variant=services';
+    const { data } = await apiRequest(endpoint);
 
     if (!data?.status) {
       state.services = [];
+      state.serviceDirectory = {
+        categories: [],
+        categoryEntries: [],
+        byProviderCategoryId: new Map(),
+      };
       state.serviceIndex = {
         categories: [],
         categoryEntries: [],
@@ -1345,18 +1322,35 @@ async function loadServices(options = {}) {
         globalSortedByPrice: [],
         byExactName: new Map(),
       };
+      state.selectedServiceId = 0;
+      state.servicesSearchCache = new Map();
+      state.serviceCatalogRows = [];
+      state.serviceCatalogTotal = 0;
+      state.serviceCatalogTotalPages = 1;
+      state.serviceCatalogLoaded = false;
       populateServiceCatalogCategoryOptions();
       state.servicesLoaded = false;
       updateCommentVisibility(null);
       if (pricePer1000El) {
         pricePer1000El.value = rupiah(0);
       }
-      serviceInfoEl.textContent = 'Daftar layanan dari provider sedang tidak tersedia.';
+      if (serviceInfoEl) {
+        serviceInfoEl.textContent = data?.data?.msg || 'Daftar layanan sedang tidak tersedia.';
+      }
       renderServicesCatalog();
       return false;
     }
 
-    state.services = Array.isArray(data.data) ? data.data : [];
+    if (force) {
+      state.servicesSearchCache = new Map();
+      state.selectedServiceId = 0;
+      state.serviceCatalogLoaded = false;
+    }
+
+    const categories = Array.isArray(data.data?.categories) ? data.data.categories : [];
+    buildServiceDirectory(categories);
+
+    state.services = [];
     buildServiceIndex();
     state.servicesLoaded = true;
     populateServiceCatalogCategoryOptions();
@@ -1370,30 +1364,12 @@ async function loadServices(options = {}) {
     if (serviceCatalogSortDirEl) {
       serviceCatalogSortDirEl.value = String(state.serviceCatalog.sortDir || 'asc');
     }
-    if (!state.services.length) {
-      state.serviceIndex = {
-        categories: [],
-        categoryEntries: [],
-        byCategory: new Map(),
-        byCategorySortedByPrice: new Map(),
-        byServiceId: new Map(),
-        byProviderCategoryId: new Map(),
-        categoryProviderId: new Map(),
-        globalSortedByPrice: [],
-        byExactName: new Map(),
-      };
-      populateServiceCatalogCategoryOptions();
-      updateCommentVisibility(null);
-      if (pricePer1000El) {
-        pricePer1000El.value = rupiah(0);
-      }
-      serviceInfoEl.textContent = 'Daftar layanan kosong.';
-      renderServicesCatalog();
-      return true;
-    }
 
     fillCategoryOptions();
-    renderServicesCatalog();
+    await fillServiceOptions({ force });
+    if (serviceInfoEl && !selectedService()) {
+      serviceInfoEl.textContent = 'Pilih kategori lalu pilih layanan untuk melihat detail harga dan ketentuan.';
+    }
     return true;
   })();
 
@@ -1402,6 +1378,67 @@ async function loadServices(options = {}) {
   } finally {
     state.servicesLoadingPromise = null;
   }
+}
+
+async function loadServicesCatalog(options = {}) {
+  if (!servicesCatalogBodyEl) return;
+
+  const force = !!options.force;
+  if (!state.servicesLoaded) {
+    const ok = await loadServices({ force });
+    if (!ok) {
+      return;
+    }
+  }
+
+  const requestId = ++state.serviceCatalogRequestId;
+  if (servicesCatalogSummaryEl) {
+    servicesCatalogSummaryEl.textContent = 'Memuat daftar layanan...';
+  }
+
+  const params = new URLSearchParams({
+    mode: 'catalog',
+    variant: 'services',
+    q: String(state.serviceCatalog.query || '').trim(),
+    category: String(state.serviceCatalog.category || '').trim(),
+    sort_by: String(state.serviceCatalog.sortBy || 'category_name'),
+    sort_dir: String(state.serviceCatalog.sortDir || 'asc') === 'desc' ? 'desc' : 'asc',
+    page: String(Math.max(1, Number(state.serviceCatalog.page || 1))),
+    per_page: String(Math.max(1, Number(state.serviceCatalog.perPage || 50))),
+  });
+
+  const endpoint = force
+    ? `./api/services.php?${params.toString()}&_t=${Date.now()}`
+    : `./api/services.php?${params.toString()}`;
+  const { data } = await apiRequest(endpoint);
+
+  if (requestId !== state.serviceCatalogRequestId) {
+    return;
+  }
+
+  if (!data?.status) {
+    state.serviceCatalogRows = [];
+    state.serviceCatalogTotal = 0;
+    state.serviceCatalogTotalPages = 1;
+    state.serviceCatalogLoaded = false;
+    renderServicesCatalog();
+    if (servicesCatalogSummaryEl) {
+      servicesCatalogSummaryEl.textContent = data?.data?.msg || 'Gagal memuat daftar layanan.';
+    }
+    return;
+  }
+
+  const payload = data.data || {};
+  state.serviceCatalogRows = Array.isArray(payload.rows) ? payload.rows : [];
+  state.serviceCatalogTotal = Number(payload.total || 0);
+  state.serviceCatalogTotalPages = Math.max(1, Number(payload.total_pages || 1));
+  state.serviceCatalog.page = Math.max(1, Number(payload.page || state.serviceCatalog.page || 1));
+  state.serviceCatalog.perPage = Math.max(1, Number(payload.per_page || state.serviceCatalog.perPage || 50));
+  if (servicesCatalogPerPageEl) {
+    servicesCatalogPerPageEl.value = String(state.serviceCatalog.perPage);
+  }
+  state.serviceCatalogLoaded = true;
+  renderServicesCatalog();
 }
 
 async function loadTop5Services(options = {}) {
@@ -2162,6 +2199,9 @@ async function ensureViewData(view, options = {}) {
         await loadAdminNews({ force });
       }
       break;
+    case 'profile':
+      updateProfilePanel();
+      break;
     case 'top5':
       await loadTop5Services({ force });
       break;
@@ -2177,6 +2217,7 @@ async function ensureViewData(view, options = {}) {
       break;
     case 'services':
       await loadServices({ force });
+      await loadServicesCatalog({ force });
       break;
     case 'admin':
       if (isAdmin) {
@@ -2304,7 +2345,22 @@ document.getElementById('orderForm').addEventListener('submit', async (event) =>
     return;
   }
 
-  const service = selectedService();
+  let service = selectedService();
+
+  if (!service) {
+    const fallbackMatch = String(serviceInputEl?.value || '').trim().match(/^#?\s*(\d+)/);
+    const fallbackId = Number(fallbackMatch?.[1] || 0);
+    if (fallbackId > 0) {
+      const { data: detailData } = await apiRequest(`./api/services.php?mode=detail&variant=services&id=${fallbackId}`);
+      if (detailData?.status && detailData?.data?.service) {
+        service = detailData.data.service;
+        state.services = [service];
+        buildServiceIndex();
+        state.selectedServiceId = Number(service.id || 0);
+        serviceInputEl.value = serviceOptionLabel(service);
+      }
+    }
+  }
 
   if (!service) {
     showNotice(orderNotice, 'err', 'Layanan tidak ditemukan. Pilih dari dropdown saran layanan.');
@@ -2569,7 +2625,9 @@ if (categoryInputEl) {
 }
 
 if (serviceInputEl) {
-  const debouncedFillServiceOptions = debounce(fillServiceOptions, 120);
+  const debouncedFillServiceOptions = debounce(() => {
+    fillServiceOptions();
+  }, 240);
   serviceInputEl.addEventListener('input', debouncedFillServiceOptions);
   serviceInputEl.addEventListener('change', fillServiceOptions);
 }
@@ -2582,8 +2640,8 @@ if (serviceCatalogSearchEl) {
   const debouncedCatalogSearch = debounce(() => {
     state.serviceCatalog.query = serviceCatalogSearchEl.value || '';
     state.serviceCatalog.page = 1;
-    renderServicesCatalog();
-  }, 180);
+    loadServicesCatalog({ force: true });
+  }, 260);
   serviceCatalogSearchEl.addEventListener('input', () => {
     debouncedCatalogSearch();
   });
@@ -2593,7 +2651,7 @@ if (serviceCatalogCategoryEl) {
   serviceCatalogCategoryEl.addEventListener('change', () => {
     state.serviceCatalog.category = serviceCatalogCategoryEl.value || '';
     state.serviceCatalog.page = 1;
-    renderServicesCatalog();
+    loadServicesCatalog({ force: true });
   });
 }
 
@@ -2601,7 +2659,7 @@ if (serviceCatalogSortByEl) {
   serviceCatalogSortByEl.addEventListener('change', () => {
     state.serviceCatalog.sortBy = serviceCatalogSortByEl.value || 'category_name';
     state.serviceCatalog.page = 1;
-    renderServicesCatalog();
+    loadServicesCatalog({ force: true });
   });
 }
 
@@ -2609,7 +2667,7 @@ if (serviceCatalogSortDirEl) {
   serviceCatalogSortDirEl.addEventListener('change', () => {
     state.serviceCatalog.sortDir = serviceCatalogSortDirEl.value === 'desc' ? 'desc' : 'asc';
     state.serviceCatalog.page = 1;
-    renderServicesCatalog();
+    loadServicesCatalog({ force: true });
   });
 }
 
@@ -2617,7 +2675,7 @@ if (servicesCatalogPerPageEl) {
   servicesCatalogPerPageEl.addEventListener('change', () => {
     state.serviceCatalog.perPage = Number(servicesCatalogPerPageEl.value || 50);
     state.serviceCatalog.page = 1;
-    renderServicesCatalog();
+    loadServicesCatalog({ force: true });
   });
 }
 
@@ -2630,7 +2688,7 @@ if (servicesCatalogPaginationEl) {
     if (!Number.isFinite(nextPage) || nextPage <= 0) return;
 
     state.serviceCatalog.page = nextPage;
-    renderServicesCatalog();
+    loadServicesCatalog({ force: true });
   });
 }
 
@@ -2825,6 +2883,11 @@ btnLogout.addEventListener('click', async () => {
   state.user = null;
   state.stats = { total_orders: 0, total_spent: 0 };
   state.services = [];
+  state.serviceDirectory = {
+    categories: [],
+    categoryEntries: [],
+    byProviderCategoryId: new Map(),
+  };
   state.serviceIndex = {
     categories: [],
     categoryEntries: [],
@@ -2836,8 +2899,11 @@ btnLogout.addEventListener('click', async () => {
     globalSortedByPrice: [],
     byExactName: new Map(),
   };
+  state.selectedServiceId = 0;
   state.servicesLoaded = false;
   state.servicesLoadingPromise = null;
+  state.servicesSearchCache = new Map();
+  state.servicesSearchRequestId = 0;
   state.topServices = [];
   state.topServicesLoaded = false;
   state.orders = [];
@@ -2868,6 +2934,11 @@ btnLogout.addEventListener('click', async () => {
     perPage: 50,
     page: 1,
   };
+  state.serviceCatalogRows = [];
+  state.serviceCatalogTotal = 0;
+  state.serviceCatalogTotalPages = 1;
+  state.serviceCatalogLoaded = false;
+  state.serviceCatalogRequestId = 0;
   if (serviceCatalogSearchEl) serviceCatalogSearchEl.value = '';
   if (serviceCatalogCategoryEl) serviceCatalogCategoryEl.value = '';
   if (serviceCatalogSortByEl) serviceCatalogSortByEl.value = 'category_name';
@@ -2885,6 +2956,8 @@ btnLogout.addEventListener('click', async () => {
   renderAdminPaymentOrders();
   renderNews();
   renderAdminNews();
+  updateHeaderStats();
+  updateProfilePanel();
   setViewLoggedIn(false);
   switchAuthTab('login');
   showNotice(authNotice, 'ok', 'Kamu sudah logout.');
@@ -2912,6 +2985,7 @@ hideLogoIfMissing('sideLogo');
   renderAdminPaymentOrders();
   renderNews();
   renderAdminNews();
+  updateProfilePanel();
 
   try {
     const loggedIn = await fetchSession();

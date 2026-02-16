@@ -11,7 +11,7 @@ $paymentConfig = (array)($config['payment'] ?? []);
 $qrisPath = htmlspecialchars((string)($paymentConfig['qris_image'] ?? 'assets/qris.png'), ENT_QUOTES, 'UTF-8');
 $paymentMethods = checkoutPaymentMethods($config);
 $paymentMethodsJson = htmlspecialchars((string)json_encode($paymentMethods, JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8');
-$allowedViews = ['dashboard', 'top5', 'purchase', 'refill', 'deposit', 'ticket', 'services', 'pages', 'admin'];
+$allowedViews = ['dashboard', 'profile', 'top5', 'purchase', 'refill', 'deposit', 'ticket', 'services', 'pages', 'admin'];
 $requestedView = mb_strtolower(trim((string)($_GET['page'] ?? 'dashboard')));
 $initialView = in_array($requestedView, $allowedViews, true) ? $requestedView : 'dashboard';
 $cssVersion = (string)(@filemtime(__DIR__ . '/assets/app.css') ?: time());
@@ -89,6 +89,7 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
         </div>
         <nav class="menu">
           <a href="./?page=dashboard" data-view="dashboard" class="<?= $initialView === 'dashboard' ? 'active' : '' ?>">Dashboard</a>
+          <a href="./?page=profile" data-view="profile" class="<?= $initialView === 'profile' ? 'active' : '' ?>">Profil</a>
           <a href="./?page=top5" data-view="top5" class="<?= $initialView === 'top5' ? 'active' : '' ?>">Top 5</a>
           <a href="./?page=purchase" data-view="purchase" class="<?= $initialView === 'purchase' ? 'active' : '' ?>">Pembelian</a>
           <a href="./?page=refill" data-view="refill" class="<?= $initialView === 'refill' ? 'active' : '' ?>">Refill</a>
@@ -117,6 +118,54 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
           <article><small>Menunggu Konfirmasi Admin</small><strong id="statBalance">0</strong></article>
           <article><small>Sedang Diproses</small><strong id="statOrders">0</strong></article>
           <article><small>Order Selesai</small><strong id="statSpent">0</strong></article>
+        </section>
+
+        <section id="profileSection" class="card" data-view-section="profile">
+          <h3>Profil Akun</h3>
+          <div class="profile-grid">
+            <div class="profile-item">
+              <span class="profile-label">Username</span>
+              <strong id="profileUsername">-</strong>
+            </div>
+            <div class="profile-item">
+              <span class="profile-label">Role</span>
+              <strong id="profileRole">-</strong>
+            </div>
+            <div class="profile-item">
+              <span class="profile-label">Email</span>
+              <strong id="profileEmail">-</strong>
+            </div>
+            <div class="profile-item">
+              <span class="profile-label">Terdaftar Sejak</span>
+              <strong id="profileCreatedAt">-</strong>
+            </div>
+            <div class="profile-item">
+              <span class="profile-label">Login Terakhir</span>
+              <strong id="profileLastLoginAt">-</strong>
+            </div>
+            <div class="profile-item">
+              <span class="profile-label">Total Belanja</span>
+              <strong id="profileTotalSpent">Rp0</strong>
+            </div>
+          </div>
+          <div class="profile-grid compact" style="margin-top:10px;">
+            <div class="profile-item">
+              <span class="profile-label">Total Order</span>
+              <strong id="profileTotalOrders">0</strong>
+            </div>
+            <div class="profile-item">
+              <span class="profile-label">Menunggu Konfirmasi</span>
+              <strong id="profileWaitingOrders">0</strong>
+            </div>
+            <div class="profile-item">
+              <span class="profile-label">Sedang Diproses</span>
+              <strong id="profileProcessingOrders">0</strong>
+            </div>
+            <div class="profile-item">
+              <span class="profile-label">Selesai</span>
+              <strong id="profileCompletedOrders">0</strong>
+            </div>
+          </div>
         </section>
 
         <section id="newsSection" class="card" data-view-section="dashboard">

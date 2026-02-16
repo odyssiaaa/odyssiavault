@@ -207,7 +207,7 @@ function authUser(PDO $pdo): ?array
         return null;
     }
 
-    $stmt = $pdo->prepare('SELECT id, username, email, full_name, balance, role FROM users WHERE id = :id AND is_active = 1 LIMIT 1');
+    $stmt = $pdo->prepare('SELECT id, username, email, full_name, balance, role, created_at, last_login_at FROM users WHERE id = :id AND is_active = 1 LIMIT 1');
     $stmt->execute(['id' => $userId]);
     $user = $stmt->fetch();
 

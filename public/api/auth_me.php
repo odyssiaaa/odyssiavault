@@ -37,6 +37,8 @@ jsonResponse([
             'full_name' => (string)($user['full_name'] ?: $user['username']),
             'role' => (string)$user['role'],
             'balance' => (int)$user['balance'],
+            'created_at' => (string)($user['created_at'] ?? ''),
+            'last_login_at' => (string)($user['last_login_at'] ?? ''),
         ],
         'stats' => [
             'total_orders' => (int)($stats['total_orders'] ?? 0),

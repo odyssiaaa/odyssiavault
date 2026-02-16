@@ -5,6 +5,7 @@
 - Login & register user (session PHP) dengan proses cepat.
 - Pembayaran direct tanpa deposit/wallet.
 - Search bar kategori & layanan dengan prioritas hasil relevan.
+- Optimasi daftar layanan: kategori/search/katalog dimuat bertahap dari server (tidak tarik semua layanan sekaligus), jadi jauh lebih ringan di mobile/laptop dan aman untuk deploy serverless.
 - Kolom komentar dinamis (wajib hanya untuk layanan tipe Komen).
 - Harga layanan mengikuti provider (basis per 1000) + markup 35% semua layanan + ditampilkan juga harga satuan.
 - Dukungan field order kondisional API:
