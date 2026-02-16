@@ -121,6 +121,9 @@ const API_REQUEST_TIMEOUT_MS = 35000;
 const API_GET_CACHE_TTL_MS = 30000;
 const API_GET_CACHE_MAX_ITEMS = 120;
 const ADMIN_PENDING_POLL_MS = 30000;
+const PENDING_PAYMENT_SYNC_POLL_MS = 22000;
+const PENDING_PAYMENT_SYNC_MIN_GAP_MS = 8000;
+const PENDING_PAYMENT_SYNC_MAX_ORDERS = 3;
 const SESSION_FETCH_RETRY_ATTEMPTS = 3;
 const SESSION_FETCH_RETRY_DELAY_MS = 480;
 const HOSTING_CHALLENGE_RELOAD_KEY = 'odyssiavault_hosting_challenge_reload_at';
@@ -153,6 +156,9 @@ const ID_COLLATOR = new Intl.Collator('id', { sensitivity: 'base', numeric: true
 const apiGetCache = new Map();
 const apiInFlight = new Map();
 let adminPendingPollTimer = null;
+let pendingPaymentSyncTimer = null;
+let pendingPaymentSyncInFlight = false;
+let pendingPaymentSyncLastRunAt = 0;
 let adminPendingInitialized = false;
 let adminNotificationPermissionAsked = false;
 let adminSeenPendingOrderIds = new Set();
@@ -1319,6 +1325,157 @@ function stopAdminPendingPoller() {
   adminSeenPendingOrderIds = new Set();
 }
 
+function stopPendingPaymentSyncPoller() {
+  if (pendingPaymentSyncTimer) {
+    clearInterval(pendingPaymentSyncTimer);
+    pendingPaymentSyncTimer = null;
+  }
+  pendingPaymentSyncInFlight = false;
+  pendingPaymentSyncLastRunAt = 0;
+}
+
+function collectPendingSyncOrderIds(isAdmin) {
+  const source = isAdmin
+    ? (Array.isArray(state.adminPaymentOrders) ? state.adminPaymentOrders : [])
+    : (Array.isArray(state.orders) ? state.orders : []);
+
+  const ids = [];
+  for (const item of source) {
+    if (!item || typeof item !== 'object') continue;
+    const id = Number(item.id || 0);
+    if (!Number.isFinite(id) || id <= 0) continue;
+
+    const normalizedStatus = normalizeOrderStatus(item);
+    if (normalizedStatus !== 'Menunggu Pembayaran') continue;
+
+    const hasProviderOrderId = String(item.provider_order_id || '').trim() !== '';
+    if (hasProviderOrderId) continue;
+
+    const paymentMethod = String(item.payment_method || '').toLowerCase();
+    const paymentChannel = String(item.payment_channel_name || '').toLowerCase();
+    const isPakasirOrder = paymentMethod === 'pakasir' || paymentChannel.includes('pakasir');
+    if (!isPakasirOrder) continue;
+
+    ids.push(id);
+    if (ids.length >= PENDING_PAYMENT_SYNC_MAX_ORDERS) {
+      break;
+    }
+  }
+
+  return ids;
+}
+
+async function syncPendingPaymentOrders(options = {}) {
+  const silent = !!options.silent;
+  const detectProgress = !!options.detectProgress;
+  if (!state.user) return;
+  if (pendingPaymentSyncInFlight) return;
+
+  const now = Date.now();
+  if ((now - pendingPaymentSyncLastRunAt) < PENDING_PAYMENT_SYNC_MIN_GAP_MS) {
+    return;
+  }
+
+  const isAdmin = String(state.user?.role || '') === 'admin';
+  pendingPaymentSyncInFlight = true;
+  pendingPaymentSyncLastRunAt = now;
+
+  try {
+    if (isAdmin) {
+      if (!state.adminPaymentOrdersLoaded) {
+        await loadAdminPaymentOrders({ force: true, silent: true, detectNew: false });
+      }
+    } else if (!state.ordersLoaded) {
+      await loadOrders({ force: false });
+    }
+
+    const orderIds = collectPendingSyncOrderIds(isAdmin);
+    if (!orderIds.length) return;
+
+    const changedOrders = [];
+    for (const orderId of orderIds) {
+      const { data } = await apiRequest('./api/order_status.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order_id: orderId }),
+      });
+
+      if (!data?.status) {
+        continue;
+      }
+
+      const normalizedStatus = String(data?.data?.status || '').trim() || 'Menunggu Pembayaran';
+      if (normalizedStatus !== 'Menunggu Pembayaran') {
+        changedOrders.push({
+          id: orderId,
+          status: normalizedStatus,
+          msg: String(data?.data?.msg || '').trim(),
+        });
+      }
+
+      await waitMs(100);
+    }
+
+    if (!changedOrders.length) {
+      return;
+    }
+
+    await Promise.all([
+      fetchSession({ attempts: SESSION_FETCH_RETRY_ATTEMPTS, softFail: true }),
+      loadOrders({ force: true }),
+      isAdmin ? loadAdminPaymentOrders({ force: true, silent: true, detectNew: true }) : Promise.resolve(),
+      loadTop5Services({ force: true }),
+    ]);
+    updateHeaderStats();
+    updateAdminMenuLabel();
+
+    if (!silent) {
+      const firstChanged = changedOrders[0];
+      const infoMsg = firstChanged?.msg
+        || `Order #${firstChanged?.id || '-'} otomatis ter-update ke status ${firstChanged?.status || '-'}.`;
+      if (isAdmin && adminPaymentNoticeEl && state.currentView === 'admin') {
+        showNotice(adminPaymentNoticeEl, 'ok', infoMsg);
+      } else if (ordersNotice && state.currentView === 'purchase') {
+        showNotice(ordersNotice, 'ok', infoMsg);
+      }
+    }
+
+    if (detectProgress && isAdmin && changedOrders.length > 0) {
+      const firstChanged = changedOrders[0];
+      showAdminToast(
+        `Order #${firstChanged.id} ter-update ke ${firstChanged.status}`,
+        'ok',
+        5200
+      );
+    }
+  } finally {
+    pendingPaymentSyncInFlight = false;
+  }
+}
+
+function startPendingPaymentSyncPoller() {
+  if (!state.user) {
+    stopPendingPaymentSyncPoller();
+    return;
+  }
+  if (pendingPaymentSyncTimer) {
+    return;
+  }
+
+  syncPendingPaymentOrders({ silent: true, detectProgress: false }).catch(() => {
+    // Ignore first sync error.
+  });
+
+  pendingPaymentSyncTimer = setInterval(() => {
+    if (document.hidden || !state.user) {
+      return;
+    }
+    syncPendingPaymentOrders({ silent: true, detectProgress: true }).catch(() => {
+      // Ignore background sync error.
+    });
+  }, PENDING_PAYMENT_SYNC_POLL_MS);
+}
+
 function startAdminPendingPoller() {
   const isAdmin = String(state.user?.role || '') === 'admin';
   if (!isAdmin) {
@@ -1340,8 +1497,11 @@ function startAdminPendingPoller() {
     if (document.hidden) {
       return;
     }
-    loadAdminPaymentOrders({ force: true, silent: true, detectNew: true }).catch(() => {
-      // Ignore background polling error.
+    Promise.all([
+      loadAdminPaymentOrders({ force: true, silent: true, detectNew: true }),
+      syncPendingPaymentOrders({ silent: true, detectProgress: true }),
+    ]).catch(() => {
+      // Ignore background polling/sync error.
     });
   }, ADMIN_PENDING_POLL_MS);
 }
@@ -2144,6 +2304,7 @@ async function fetchSession(options = {}) {
       state.stats = data.data.stats || { total_orders: 0, total_spent: 0 };
       updateAdminMenuLabel();
       startAdminPendingPoller();
+      startPendingPaymentSyncPoller();
       updateHeaderStats();
       updateAccountMenu();
       updateProfilePanel();
@@ -2166,6 +2327,7 @@ async function fetchSession(options = {}) {
   }
 
   stopAdminPendingPoller();
+  stopPendingPaymentSyncPoller();
   state.user = null;
   state.stats = { total_orders: 0, total_spent: 0 };
   state.adminPaymentOrders = [];
@@ -4162,14 +4324,7 @@ async function submitPaymentConfirmation(source = 'panel') {
     if (paymentQrConfirmBtnEl) paymentQrConfirmBtnEl.disabled = true;
     showNotice(noticeEl, 'info', 'Mengecek status pembayaran otomatis dari Pakasir...');
 
-    const statusPayload = {
-      order_id: Number(checkout.order_id || 0),
-    };
-    const { data: statusData } = await apiRequest('./api/order_status.php', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(statusPayload),
-    });
+    const statusData = await requestOrderStatusUpdate(Number(checkout.order_id || 0));
 
     if (!statusData?.status) {
       if (paymentConfirmBtnEl) paymentConfirmBtnEl.disabled = false;
@@ -4660,13 +4815,30 @@ async function loadOrders(options = {}) {
   renderOrders();
 }
 
-async function checkOrderStatus(orderId) {
-  showNotice(ordersNotice, 'info', `Mengecek status order #${orderId}...`);
+async function requestOrderStatusUpdate(orderId) {
+  const normalizedOrderId = Number(orderId || 0);
+  if (!Number.isFinite(normalizedOrderId) || normalizedOrderId <= 0) {
+    return {
+      status: false,
+      data: { msg: 'Order ID tidak valid.' },
+    };
+  }
+
   const { data } = await apiRequest('./api/order_status.php', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ order_id: orderId }),
+    body: JSON.stringify({ order_id: normalizedOrderId }),
   });
+
+  return data || {
+    status: false,
+    data: { msg: 'Gagal mengecek status order.' },
+  };
+}
+
+async function checkOrderStatus(orderId) {
+  showNotice(ordersNotice, 'info', `Mengecek status order #${orderId}...`);
+  const data = await requestOrderStatusUpdate(orderId);
 
   if (!data.status) {
     showNotice(ordersNotice, 'err', data?.data?.msg || 'Gagal cek status order.');
@@ -5277,12 +5449,14 @@ document.addEventListener('visibilitychange', () => {
   }
 
   const isAdmin = String(state.user?.role || '') === 'admin';
-  if (!isAdmin) {
-    return;
+  if (isAdmin) {
+    loadAdminPaymentOrders({ force: true, silent: true, detectNew: true }).catch(() => {
+      // Ignore foreground resume polling error.
+    });
   }
 
-  loadAdminPaymentOrders({ force: true, silent: true, detectNew: true }).catch(() => {
-    // Ignore foreground resume polling error.
+  syncPendingPaymentOrders({ silent: true, detectProgress: true }).catch(() => {
+    // Ignore foreground resume sync error.
   });
 });
 
@@ -5855,6 +6029,7 @@ if (btnLogout) {
   btnLogout.addEventListener('click', async () => {
   await apiRequest('./api/auth_logout.php', { method: 'POST' });
   stopAdminPendingPoller();
+  stopPendingPaymentSyncPoller();
   if (serviceInfoRafId && typeof cancelAnimationFrame === 'function') {
     cancelAnimationFrame(serviceInfoRafId);
   }

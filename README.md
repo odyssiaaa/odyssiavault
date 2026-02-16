@@ -311,6 +311,9 @@ Mode verifikasi webhook yang didukung:
    - webhook callback (jika hosting mendukung inbound webhook), atau
    - fallback `Cek Status Pembayaran` dari halaman buyer (otomatis verifikasi ke Pakasir lalu langsung kirim ke provider).
 5. Jika status masih pending, buyer bisa klik `Cek Status Pembayaran` lagi beberapa detik kemudian.
+6. Sistem juga punya auto-sync background dari sesi user/admin yang aktif:
+   - order pending akan dicek berkala ke Pakasir,
+   - jika sudah paid maka order otomatis diproses tanpa klik manual tambahan.
 
 Catatan penting hosting gratis (InfinityFree):
 - Beberapa request webhook eksternal bisa terkena proteksi challenge JS hosting.

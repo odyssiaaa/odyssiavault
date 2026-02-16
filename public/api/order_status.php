@@ -5,6 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/bootstrap.php';
 
 $user = requireAuth($pdo);
+$isAdminUser = (string)($user['role'] ?? 'user') === 'admin';
 expireUnpaidOrders($pdo);
 
 $input = getRequestInput();
@@ -40,21 +41,32 @@ $gatewayTxnStatus = '';
 $justProcessedFromGateway = false;
 $justProcessedProviderOrderId = '';
 $gatewayNotifyContext = null;
+$orderOwnerUsername = (string)($user['username'] ?? '');
+$updateWhereClause = $isAdminUser ? 'id = :id' : 'id = :id AND user_id = :user_id';
+$withAccessParams = static function (array $params) use ($isAdminUser, $user): array {
+    if (!$isAdminUser) {
+        $params['user_id'] = (int)$user['id'];
+    }
+    return $params;
+};
 
 try {
     $pdo->beginTransaction();
 
-    $orderStmt = $pdo->prepare(
-        'SELECT id, user_id, provider_order_id, status, payload_json, total_sell_price, payment_reference, payment_method, payment_channel_name, payment_note, service_name, target, quantity
-         FROM orders
-         WHERE id = :id AND user_id = :user_id
-         LIMIT 1
-         FOR UPDATE'
-    );
-    $orderStmt->execute([
-        'id' => $orderId,
-        'user_id' => (int)$user['id'],
-    ]);
+    $orderSelectSql = '
+        SELECT o.id, o.user_id, o.provider_order_id, o.status, o.payload_json, o.total_sell_price, o.payment_reference, o.payment_method, o.payment_channel_name, o.payment_note, o.service_name, o.target, o.quantity, u.username AS order_username
+        FROM orders o
+        INNER JOIN users u ON u.id = o.user_id
+        WHERE o.id = :id';
+    $orderSelectParams = ['id' => $orderId];
+    if (!$isAdminUser) {
+        $orderSelectSql .= ' AND o.user_id = :user_id';
+        $orderSelectParams['user_id'] = (int)$user['id'];
+    }
+    $orderSelectSql .= ' LIMIT 1 FOR UPDATE';
+
+    $orderStmt = $pdo->prepare($orderSelectSql);
+    $orderStmt->execute($orderSelectParams);
     $order = $orderStmt->fetch();
 
     if (!is_array($order)) {
@@ -67,6 +79,7 @@ try {
 
     $providerOrderId = trim((string)($order['provider_order_id'] ?? ''));
     $currentStatus = trim((string)($order['status'] ?? 'Menunggu Pembayaran'));
+    $orderOwnerUsername = trim((string)($order['order_username'] ?? $orderOwnerUsername));
 
     // Fallback verifikasi otomatis untuk Pakasir ketika webhook eksternal tidak masuk.
     if (
@@ -216,10 +229,10 @@ try {
                      error_message = :error_message,
                      provider_response_json = :provider_response_json,
                      updated_at = :updated_at
-                 WHERE id = :id AND user_id = :user_id'
+                 WHERE ' . $updateWhereClause
             );
             $now = nowDateTime();
-            $failStmt->execute([
+            $failStmt->execute($withAccessParams([
                 'status' => 'Error',
                 'provider_status' => $detailTxnStatus,
                 'payment_method' => 'gateway',
@@ -232,8 +245,7 @@ try {
                 'provider_response_json' => json_encode($providerResult, JSON_UNESCAPED_UNICODE),
                 'updated_at' => $now,
                 'id' => $orderId,
-                'user_id' => (int)$user['id'],
-            ]);
+            ]));
 
             $pdo->commit();
             jsonResponse([
@@ -273,10 +285,10 @@ try {
                  payment_confirmed_by_admin_at = COALESCE(payment_confirmed_by_admin_at, :payment_confirmed_by_admin_at),
                  provider_response_json = :provider_response_json,
                  updated_at = :updated_at
-             WHERE id = :id AND user_id = :user_id'
+             WHERE ' . $updateWhereClause
         );
         $now = nowDateTime();
-        $verifyStmt->execute([
+        $verifyStmt->execute($withAccessParams([
             'provider_order_id' => $providerOrderId,
             'status' => 'Diproses',
             'provider_status' => 'Processing',
@@ -289,8 +301,7 @@ try {
             'provider_response_json' => json_encode($providerResult, JSON_UNESCAPED_UNICODE),
             'updated_at' => $now,
             'id' => $orderId,
-            'user_id' => (int)$user['id'],
-        ]);
+        ]));
 
         $currentStatus = 'Diproses';
         $justProcessedFromGateway = true;
@@ -322,7 +333,7 @@ if ($justProcessedFromGateway) {
     $notifyTotal = is_array($gatewayNotifyContext) ? (int)($gatewayNotifyContext['total_sell_price'] ?? 0) : 0;
     notifyAdminPendingPaymentChannels($config, [
         'order_id' => $orderId,
-        'username' => (string)($user['username'] ?? ''),
+        'username' => $orderOwnerUsername,
         'service_name' => $notifyServiceName,
         'target' => $notifyTarget,
         'quantity' => $notifyQty,
@@ -385,8 +396,8 @@ $remains = array_key_exists('remains', $providerData)
     ? sanitizeQuantity($providerData['remains'])
     : null;
 
-$updateStmt = $pdo->prepare('UPDATE orders SET status = :status, provider_status = :provider_status, provider_start_count = :provider_start_count, provider_remains = :provider_remains, provider_response_json = :provider_response_json, updated_at = :updated_at WHERE id = :id AND user_id = :user_id');
-$updateStmt->execute([
+$updateStmt = $pdo->prepare('UPDATE orders SET status = :status, provider_status = :provider_status, provider_start_count = :provider_start_count, provider_remains = :provider_remains, provider_response_json = :provider_response_json, updated_at = :updated_at WHERE ' . $updateWhereClause);
+$updateStmt->execute($withAccessParams([
     'status' => $mappedStatus,
     'provider_status' => $rawProviderStatus,
     'provider_start_count' => $startCount,
@@ -394,8 +405,7 @@ $updateStmt->execute([
     'provider_response_json' => json_encode($statusResult, JSON_UNESCAPED_UNICODE),
     'updated_at' => nowDateTime(),
     'id' => $orderId,
-    'user_id' => (int)$user['id'],
-]);
+]));
 
 jsonResponse([
     'status' => true,
