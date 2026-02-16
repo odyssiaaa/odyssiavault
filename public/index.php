@@ -57,7 +57,10 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
           </div>
           <div>
             <label>Password</label>
-            <input id="loginPassword" type="password" placeholder="Masukkan password" required>
+            <div class="password-field">
+              <input id="loginPassword" type="password" placeholder="Masukkan password" autocomplete="current-password" required>
+              <button id="loginPasswordToggle" class="password-toggle" type="button" aria-label="Lihat password" aria-pressed="false">Lihat</button>
+            </div>
           </div>
           <button type="submit">Masuk Dashboard</button>
         </form>
