@@ -205,12 +205,20 @@ $createPakasirTransaction = static function (int $localOrderId, int $orderAmount
     }
 
     $timeout = max(6, min(40, (int)($paymentGatewayConfig['pakasir_timeout'] ?? 20)));
+    $minAmount = max(1, (int)($paymentGatewayConfig['pakasir_min_amount'] ?? 500));
     $qrisOnly = parseLooseBool($paymentGatewayConfig['pakasir_qris_only'] ?? true, true);
 
     if ($apiKey === '' || $project === '') {
         return [
             'status' => false,
             'msg' => 'Konfigurasi Pakasir belum lengkap (api key / project slug).',
+        ];
+    }
+
+    if ($orderAmount < $minAmount) {
+        return [
+            'status' => false,
+            'msg' => 'Minimum pembayaran Pakasir QRIS adalah Rp ' . number_format($minAmount, 0, ',', '.') . '. Silakan naikkan jumlah order.',
         ];
     }
 

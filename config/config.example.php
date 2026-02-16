@@ -88,6 +88,7 @@ return [
         'pakasir_method' => 'qris',
         'pakasir_base_url' => 'https://app.pakasir.com',
         'pakasir_timeout' => 20,
+        'pakasir_min_amount' => 500,
         'pakasir_qris_only' => true,
         // Rahasia webhook yang sama persis dengan konfigurasi di gateway.
         'webhook_secret' => '',

@@ -211,6 +211,7 @@ Direkomendasikan isi juga:
 - `PAYMENT_GATEWAY_PAKASIR_PROJECT_SLUG` = `...` (slug project Pakasir)
 - `PAYMENT_GATEWAY_PAKASIR_METHOD` = `qris`
 - `PAYMENT_GATEWAY_PAKASIR_BASE_URL` = `https://app.pakasir.com`
+- `PAYMENT_GATEWAY_PAKASIR_MIN_AMOUNT` = `500`
 - `PAYMENT_GATEWAY_TRIPAY_PRIVATE_KEY` = `...` (untuk mode `tripay`)
 - `PAYMENT_GATEWAY_MIDTRANS_SERVER_KEY` = `...` (untuk mode `midtrans`)
 - `PAYMENT_GATEWAY_XENDIT_CALLBACK_TOKEN` = `...` (untuk mode `xendit`)

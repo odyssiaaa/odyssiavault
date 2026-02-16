@@ -244,6 +244,10 @@ final class Config
             'PAYMENT_GATEWAY_PAKASIR_TIMEOUT',
             (int)($paymentGateway['pakasir_timeout'] ?? 20)
         );
+        $paymentGateway['pakasir_min_amount'] = self::envInt(
+            'PAYMENT_GATEWAY_PAKASIR_MIN_AMOUNT',
+            (int)($paymentGateway['pakasir_min_amount'] ?? 500)
+        );
         $paymentGateway['pakasir_qris_only'] = self::envBool(
             'PAYMENT_GATEWAY_PAKASIR_QRIS_ONLY',
             (bool)($paymentGateway['pakasir_qris_only'] ?? true)
