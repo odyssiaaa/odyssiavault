@@ -1,0 +1,13 @@
+Options -Indexes
+
+<IfModule mod_rewrite.c>
+RewriteEngine On
+
+# Protect internal folders from direct web access.
+RewriteRule ^(config|src|database|storage|\.git|\.vercel)(/|$) - [F,L,NC]
+RewriteRule ^(README\.md|\.env|\.env\.example|vercel\.json|\.vercelignore|config\.php)$ - [F,L,NC]
+
+# Route app endpoints/assets from domain root to /public.
+RewriteRule ^assets/(.*)$ public/assets/$1 [L,NC,QSA]
+RewriteRule ^api/(.*)$ public/api/$1 [L,NC,QSA]
+</IfModule>

@@ -8,6 +8,14 @@ $input = getRequestInput();
 $identity = trim((string)($input['identity'] ?? $input['username'] ?? $input['email'] ?? ''));
 $password = (string)($input['password'] ?? '');
 
+$retryAfter = null;
+if (!rateLimitAllow('auth_login', 12, 60, $retryAfter)) {
+    jsonResponse([
+        'status' => false,
+        'data' => ['msg' => 'Terlalu banyak percobaan login. Coba lagi beberapa saat.'],
+    ], 429);
+}
+
 if ($identity === '' || $password === '') {
     jsonResponse([
         'status' => false,

@@ -20,7 +20,6 @@ final class Database
             throw new RuntimeException('Konfigurasi database belum lengkap (nama database kosong).');
         }
 
-        $dsn = sprintf('mysql:host=%s;port=%d;dbname=%s;charset=%s', $host, $port, $dbName, $charset);
         $pdoOptions = [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
@@ -32,7 +31,51 @@ final class Database
             self::applySslOptions($pdoOptions, $config);
         }
 
-        return new PDO($dsn, $username, $password, $pdoOptions);
+        $hosts = self::buildHostCandidates($host);
+        $lastException = null;
+        foreach ($hosts as $candidateHost) {
+            $dsn = sprintf('mysql:host=%s;port=%d;dbname=%s;charset=%s', $candidateHost, $port, $dbName, $charset);
+            try {
+                return new PDO($dsn, $username, $password, $pdoOptions);
+            } catch (Throwable $e) {
+                $lastException = $e;
+                error_log(sprintf('DB connect failed for host "%s": %s', $candidateHost, $e->getMessage()));
+            }
+        }
+
+        if ($lastException instanceof Throwable) {
+            throw new RuntimeException('Koneksi database gagal: ' . $lastException->getMessage(), 0, $lastException);
+        }
+
+        throw new RuntimeException('Koneksi database gagal.');
+    }
+
+    private static function buildHostCandidates(string $host): array
+    {
+        $host = trim($host);
+        if ($host === '') {
+            return ['127.0.0.1'];
+        }
+
+        $candidates = [$host];
+        if (preg_match('/^sql(\d+)\.infinityfree\.com$/i', $host, $matches)) {
+            $sqlNode = (string)($matches[1] ?? '');
+            if ($sqlNode !== '') {
+                $candidates[] = sprintf('sql%s.epizy.com', $sqlNode);
+                $candidates[] = sprintf('sql%s.byetcluster.com', $sqlNode);
+            }
+        }
+
+        $normalized = [];
+        foreach ($candidates as $candidate) {
+            $candidate = trim((string)$candidate);
+            if ($candidate === '') {
+                continue;
+            }
+            $normalized[mb_strtolower($candidate)] = $candidate;
+        }
+
+        return array_values($normalized);
     }
 
     public static function ensureSchema(PDO $pdo): void
@@ -45,6 +88,7 @@ final class Database
         try {
             self::ensureBaseTables($pdo);
             self::ensureOrdersPaymentColumns($pdo);
+            self::ensurePerformanceIndexes($pdo);
         } catch (Throwable $e) {
             error_log('Database schema ensure failed: ' . $e->getMessage());
         }
@@ -52,7 +96,7 @@ final class Database
 
     private static function ensureBaseTables(PDO $pdo): void
     {
-        $coreTables = ['users', 'orders', 'order_refills', 'balance_transactions', 'deposit_requests', 'news_posts'];
+        $coreTables = ['users', 'orders', 'order_refills', 'balance_transactions', 'deposit_requests', 'news_posts', 'tickets', 'ticket_messages'];
         $allExists = true;
         foreach ($coreTables as $table) {
             if (!self::tableExists($pdo, $table)) {
@@ -107,6 +151,20 @@ final class Database
         }
     }
 
+    private static function ensurePerformanceIndexes(PDO $pdo): void
+    {
+        if (self::tableExists($pdo, 'orders')) {
+            self::ensureIndex($pdo, 'orders', 'idx_orders_status_created', '`status`, `created_at`');
+            self::ensureIndex($pdo, 'orders', 'idx_orders_status_service_created', '`status`, `service_id`, `created_at`');
+            self::ensureIndex($pdo, 'orders', 'idx_orders_status_deadline_confirm', '`status`, `payment_deadline_at`, `payment_confirmed_at`');
+            self::ensureIndex($pdo, 'orders', 'idx_orders_user_status_created', '`user_id`, `status`, `created_at`');
+        }
+
+        if (self::tableExists($pdo, 'tickets')) {
+            self::ensureIndex($pdo, 'tickets', 'idx_tickets_user_status_updated', '`user_id`, `status`, `updated_at`');
+        }
+    }
+
     private static function tableExists(PDO $pdo, string $table): bool
     {
         $stmt = $pdo->prepare(
@@ -139,6 +197,24 @@ final class Database
         return (bool)$stmt->fetchColumn();
     }
 
+    private static function indexExists(PDO $pdo, string $table, string $indexName): bool
+    {
+        $stmt = $pdo->prepare(
+            'SELECT 1
+             FROM information_schema.statistics
+             WHERE table_schema = DATABASE()
+               AND table_name = :table
+               AND index_name = :index_name
+             LIMIT 1'
+        );
+        $stmt->execute([
+            'table' => $table,
+            'index_name' => $indexName,
+        ]);
+
+        return (bool)$stmt->fetchColumn();
+    }
+
     private static function ensureColumn(PDO $pdo, string $table, string $column, string $definition): void
     {
         if (self::columnExists($pdo, $table, $column)) {
@@ -150,6 +226,21 @@ final class Database
             str_replace('`', '``', $table),
             str_replace('`', '``', $column),
             $definition
+        );
+        $pdo->exec($sql);
+    }
+
+    private static function ensureIndex(PDO $pdo, string $table, string $indexName, string $columnList): void
+    {
+        if (self::indexExists($pdo, $table, $indexName)) {
+            return;
+        }
+
+        $sql = sprintf(
+            'ALTER TABLE `%s` ADD INDEX `%s` (%s)',
+            str_replace('`', '``', $table),
+            str_replace('`', '``', $indexName),
+            $columnList
         );
         $pdo->exec($sql);
     }

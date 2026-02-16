@@ -20,7 +20,7 @@ if ($orderId <= 0) {
 if (!$client->isConfigured()) {
     jsonResponse([
         'status' => false,
-        'data' => ['msg' => 'Konfigurasi provider belum diisi (config/env).'],
+        'data' => ['msg' => 'Konfigurasi server layanan belum diisi (config/env).'],
     ], 500);
 }
 
@@ -42,7 +42,7 @@ $providerOrderId = trim((string)($order['provider_order_id'] ?? ''));
 if ($providerOrderId === '') {
     jsonResponse([
         'status' => false,
-        'data' => ['msg' => 'Order belum memiliki ID provider, refill belum bisa diajukan.'],
+        'data' => ['msg' => 'Order belum memiliki ID server, refill belum bisa diajukan.'],
     ], 422);
 }
 
@@ -62,7 +62,7 @@ if ($pendingRefillCount > 0) {
 
 $providerResult = $client->refill($providerOrderId);
 if (!($providerResult['status'] ?? false)) {
-    $providerMsg = (string)($providerResult['data']['msg'] ?? 'Provider gagal memproses refill.');
+    $providerMsg = (string)($providerResult['data']['msg'] ?? 'Server layanan gagal memproses refill.');
     jsonResponse([
         'status' => false,
         'data' => ['msg' => $providerMsg],
@@ -73,7 +73,7 @@ $providerRefillId = trim((string)($providerResult['data']['id'] ?? ''));
 if ($providerRefillId === '') {
     jsonResponse([
         'status' => false,
-        'data' => ['msg' => 'Provider tidak mengembalikan ID refill.'],
+        'data' => ['msg' => 'Server layanan tidak mengembalikan ID refill.'],
     ], 400);
 }
 
@@ -100,7 +100,7 @@ try {
     jsonResponse([
         'status' => true,
         'data' => [
-            'msg' => 'Refill berhasil diajukan ke provider.',
+            'msg' => 'Refill berhasil diajukan ke server layanan.',
             'refill_id' => $localRefillId,
             'order_id' => $orderId,
             'provider_order_id' => $providerOrderId,

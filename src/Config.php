@@ -2,6 +2,20 @@
 
 declare(strict_types=1);
 
+if (!function_exists('mb_strtolower')) {
+    function mb_strtolower($string, $encoding = null): string
+    {
+        return strtolower((string)$string);
+    }
+}
+
+if (!function_exists('mb_strtoupper')) {
+    function mb_strtoupper($string, $encoding = null): string
+    {
+        return strtoupper((string)$string);
+    }
+}
+
 final class Config
 {
     public static function load(): array
@@ -30,7 +44,7 @@ final class Config
 
     private static function ensureSections(array $config): array
     {
-        $sections = ['app', 'db', 'provider', 'pricing', 'checkout', 'payment', 'news'];
+        $sections = ['app', 'db', 'provider', 'pricing', 'checkout', 'payment', 'payment_gateway', 'news', 'notifications'];
         foreach ($sections as $section) {
             if (!isset($config[$section]) || !is_array($config[$section])) {
                 $config[$section] = [];
@@ -51,6 +65,7 @@ final class Config
         $pricing = (array)$config['pricing'];
         $checkout = (array)$config['checkout'];
         $payment = (array)$config['payment'];
+        $paymentGateway = (array)$config['payment_gateway'];
         $news = (array)$config['news'];
 
         $app['name'] = self::env('APP_NAME', (string)($app['name'] ?? 'Odyssiavault'));
@@ -111,6 +126,13 @@ final class Config
             'PROVIDER_REQUEST_CONTENT_TYPE',
             (string)($provider['request_content_type'] ?? 'form')
         );
+        $provider['services_variant'] = self::env(
+            'PROVIDER_SERVICES_VARIANT',
+            (string)($provider['services_variant'] ?? 'services_1')
+        );
+        if (!in_array($provider['services_variant'], ['services', 'services_1', 'services2', 'services3'], true)) {
+            $provider['services_variant'] = 'services_1';
+        }
         $provider['services_cache_ttl'] = self::envInt(
             'PROVIDER_SERVICES_CACHE_TTL',
             (int)($provider['services_cache_ttl'] ?? 300)
@@ -194,6 +216,87 @@ final class Config
         $payment['unique_code_min'] = self::envInt('PAYMENT_UNIQUE_CODE_MIN', (int)($payment['unique_code_min'] ?? 11));
         $payment['unique_code_max'] = self::envInt('PAYMENT_UNIQUE_CODE_MAX', (int)($payment['unique_code_max'] ?? 99));
 
+        $paymentGateway['enabled'] = self::envBool(
+            'PAYMENT_GATEWAY_ENABLED',
+            (bool)($paymentGateway['enabled'] ?? false)
+        );
+        $paymentGateway['provider'] = self::env(
+            'PAYMENT_GATEWAY_PROVIDER',
+            (string)($paymentGateway['provider'] ?? 'custom')
+        );
+        $paymentGateway['pakasir_api_key'] = self::env(
+            'PAYMENT_GATEWAY_PAKASIR_API_KEY',
+            (string)($paymentGateway['pakasir_api_key'] ?? '')
+        );
+        $paymentGateway['pakasir_project_slug'] = self::env(
+            'PAYMENT_GATEWAY_PAKASIR_PROJECT_SLUG',
+            (string)($paymentGateway['pakasir_project_slug'] ?? '')
+        );
+        $paymentGateway['pakasir_method'] = self::env(
+            'PAYMENT_GATEWAY_PAKASIR_METHOD',
+            (string)($paymentGateway['pakasir_method'] ?? 'qris')
+        );
+        $paymentGateway['pakasir_base_url'] = self::env(
+            'PAYMENT_GATEWAY_PAKASIR_BASE_URL',
+            (string)($paymentGateway['pakasir_base_url'] ?? 'https://app.pakasir.com')
+        );
+        $paymentGateway['pakasir_timeout'] = self::envInt(
+            'PAYMENT_GATEWAY_PAKASIR_TIMEOUT',
+            (int)($paymentGateway['pakasir_timeout'] ?? 20)
+        );
+        $paymentGateway['pakasir_qris_only'] = self::envBool(
+            'PAYMENT_GATEWAY_PAKASIR_QRIS_ONLY',
+            (bool)($paymentGateway['pakasir_qris_only'] ?? true)
+        );
+        $paymentGateway['webhook_secret'] = self::env(
+            'PAYMENT_GATEWAY_WEBHOOK_SECRET',
+            (string)($paymentGateway['webhook_secret'] ?? '')
+        );
+        $paymentGateway['tripay_private_key'] = self::env(
+            'PAYMENT_GATEWAY_TRIPAY_PRIVATE_KEY',
+            (string)($paymentGateway['tripay_private_key'] ?? '')
+        );
+        $paymentGateway['midtrans_server_key'] = self::env(
+            'PAYMENT_GATEWAY_MIDTRANS_SERVER_KEY',
+            (string)($paymentGateway['midtrans_server_key'] ?? '')
+        );
+        $paymentGateway['xendit_callback_token'] = self::env(
+            'PAYMENT_GATEWAY_XENDIT_CALLBACK_TOKEN',
+            (string)($paymentGateway['xendit_callback_token'] ?? '')
+        );
+
+        $statusRaw = self::env('PAYMENT_GATEWAY_SUCCESS_STATUSES', '');
+        if ($statusRaw !== '') {
+            $statuses = preg_split('/[\s,;]+/', $statusRaw) ?: [];
+            $normalized = [];
+            foreach ($statuses as $status) {
+                $value = mb_strtoupper(trim((string)$status));
+                if ($value === '') {
+                    continue;
+                }
+                $normalized[$value] = true;
+            }
+            if ($normalized !== []) {
+                $paymentGateway['success_statuses'] = array_keys($normalized);
+            }
+        }
+
+        $orderIdKeysRaw = self::env('PAYMENT_GATEWAY_ORDER_ID_KEYS', '');
+        if ($orderIdKeysRaw !== '') {
+            $keys = preg_split('/[\s,;]+/', $orderIdKeysRaw) ?: [];
+            $normalized = [];
+            foreach ($keys as $key) {
+                $value = trim((string)$key);
+                if ($value === '') {
+                    continue;
+                }
+                $normalized[$value] = true;
+            }
+            if ($normalized !== []) {
+                $paymentGateway['order_id_keys'] = array_keys($normalized);
+            }
+        }
+
         $news['source_mode'] = self::env('NEWS_SOURCE_MODE', (string)($news['source_mode'] ?? 'provider_only'));
         $news['provider_services_variant'] = self::env(
             'NEWS_PROVIDER_VARIANT',
@@ -204,6 +307,30 @@ final class Config
             'NEWS_PROVIDER_NOTE_CHARS',
             (int)($news['provider_note_chars'] ?? 650)
         );
+        $news['web_source_url'] = self::env(
+            'NEWS_WEB_SOURCE_URL',
+            (string)($news['web_source_url'] ?? 'https://buzzerpanel.id/')
+        );
+        $news['web_limit'] = self::envInt(
+            'NEWS_WEB_LIMIT',
+            (int)($news['web_limit'] ?? 25)
+        );
+        $news['web_timeout'] = self::envInt(
+            'NEWS_WEB_TIMEOUT',
+            (int)($news['web_timeout'] ?? 12)
+        );
+        $news['web_cache_ttl'] = self::envInt(
+            'NEWS_WEB_CACHE_TTL',
+            (int)($news['web_cache_ttl'] ?? 900)
+        );
+        $news['web_fail_cache_ttl'] = self::envInt(
+            'NEWS_WEB_FAIL_CACHE_TTL',
+            (int)($news['web_fail_cache_ttl'] ?? 300)
+        );
+        $news['web_user_agent'] = self::env(
+            'NEWS_WEB_USER_AGENT',
+            (string)($news['web_user_agent'] ?? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36')
+        );
 
         $config['app'] = $app;
         $config['db'] = $db;
@@ -211,6 +338,7 @@ final class Config
         $config['pricing'] = $pricing;
         $config['checkout'] = $checkout;
         $config['payment'] = $payment;
+        $config['payment_gateway'] = $paymentGateway;
         $config['news'] = $news;
 
         return $config;

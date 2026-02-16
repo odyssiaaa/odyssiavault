@@ -5,6 +5,90 @@ declare(strict_types=1);
 const AUTH_SESSION_KEY = 'auth_user_id';
 const AUTH_TOKEN_COOKIE = 'odyssiavault_auth';
 const AUTH_TOKEN_TTL_SECONDS = 2592000; // 30 hari
+const ORDER_EXPIRE_SESSION_KEY = '__odyssiavault_expire_orders_at';
+const ORDER_EXPIRE_MIN_INTERVAL_SECONDS = 30;
+
+// Polyfill dasar untuk hosting yang tidak menyediakan ekstensi mbstring.
+if (!function_exists('mb_strlen')) {
+    function mb_strlen($string, $encoding = null): int
+    {
+        return strlen((string)$string);
+    }
+}
+
+if (!function_exists('mb_substr')) {
+    function mb_substr($string, $start, $length = null, $encoding = null): string
+    {
+        $value = (string)$string;
+        $startPos = (int)$start;
+        if ($length === null) {
+            $result = substr($value, $startPos);
+        } else {
+            $result = substr($value, $startPos, (int)$length);
+        }
+
+        return is_string($result) ? $result : '';
+    }
+}
+
+if (!function_exists('mb_strtolower')) {
+    function mb_strtolower($string, $encoding = null): string
+    {
+        return strtolower((string)$string);
+    }
+}
+
+if (!function_exists('mb_strtoupper')) {
+    function mb_strtoupper($string, $encoding = null): string
+    {
+        return strtoupper((string)$string);
+    }
+}
+
+// Polyfill untuk hosting PHP lama (< 8.0).
+if (!function_exists('str_contains')) {
+    function str_contains($haystack, $needle): bool
+    {
+        $haystack = (string)$haystack;
+        $needle = (string)$needle;
+        if ($needle === '') {
+            return true;
+        }
+
+        return strpos($haystack, $needle) !== false;
+    }
+}
+
+if (!function_exists('str_starts_with')) {
+    function str_starts_with($haystack, $needle): bool
+    {
+        $haystack = (string)$haystack;
+        $needle = (string)$needle;
+        if ($needle === '') {
+            return true;
+        }
+
+        return strpos($haystack, $needle) === 0;
+    }
+}
+
+if (!function_exists('str_ends_with')) {
+    function str_ends_with($haystack, $needle): bool
+    {
+        $haystack = (string)$haystack;
+        $needle = (string)$needle;
+        if ($needle === '') {
+            return true;
+        }
+
+        $needleLen = strlen($needle);
+        if ($needleLen > strlen($haystack)) {
+            return false;
+        }
+
+        return substr($haystack, -$needleLen) === $needle;
+    }
+}
 
 function jsonResponse(array $payload, int $status = 200): void
 {
@@ -14,6 +98,9 @@ function jsonResponse(array $payload, int $status = 200): void
 
     http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
+    header('X-Content-Type-Options: nosniff');
+    header('X-Frame-Options: SAMEORIGIN');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
     echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     exit;
 }
@@ -277,12 +364,31 @@ function logoutAuthUser(): void
 
 function isSecureRequest(): bool
 {
-    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+    $https = mb_strtolower(trim((string)($_SERVER['HTTPS'] ?? '')));
+    if ($https !== '' && $https !== 'off' && $https !== '0') {
         return true;
     }
 
-    $forwardedProto = mb_strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''));
-    return $forwardedProto === 'https';
+    $forwardedProtoRaw = mb_strtolower(trim((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')));
+    if ($forwardedProtoRaw !== '') {
+        $parts = array_map('trim', explode(',', $forwardedProtoRaw));
+        foreach ($parts as $part) {
+            if ($part === 'https') {
+                return true;
+            }
+        }
+
+        if (str_contains($forwardedProtoRaw, 'https')) {
+            return true;
+        }
+    }
+
+    $forwardedSsl = mb_strtolower(trim((string)($_SERVER['HTTP_X_FORWARDED_SSL'] ?? '')));
+    if ($forwardedSsl === 'on' || $forwardedSsl === '1' || $forwardedSsl === 'true') {
+        return true;
+    }
+
+    return (string)($_SERVER['SERVER_PORT'] ?? '') === '443';
 }
 
 function readEnvValue(string $name, string $default = ''): string
@@ -293,6 +399,16 @@ function readEnvValue(string $name, string $default = ''): string
     }
 
     return trim((string)$value);
+}
+
+function envValueOrConfig(string $name, string $configValue = ''): string
+{
+    $envValue = readEnvValue($name, '');
+    if ($envValue !== '') {
+        return $envValue;
+    }
+
+    return trim($configValue);
 }
 
 function authTokenCookieName(): string
@@ -486,6 +602,15 @@ function mapProviderRefillStatusLifecycle(?string $status): string
 
 function expireUnpaidOrders(PDO $pdo): void
 {
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        $nowTs = time();
+        $lastRunTs = (int)($_SESSION[ORDER_EXPIRE_SESSION_KEY] ?? 0);
+        if ($lastRunTs > 0 && ($nowTs - $lastRunTs) < ORDER_EXPIRE_MIN_INTERVAL_SECONDS) {
+            return;
+        }
+        $_SESSION[ORDER_EXPIRE_SESSION_KEY] = $nowTs;
+    }
+
     try {
         $stmt = $pdo->prepare(
             'UPDATE orders
@@ -509,60 +634,890 @@ function expireUnpaidOrders(PDO $pdo): void
 
 function checkoutPaymentMethods(array $config): array
 {
-    $checkout = (array)($config['checkout'] ?? []);
-    $rawMethods = (array)($checkout['payment_methods'] ?? []);
-    $normalized = [];
-
-    foreach ($rawMethods as $method) {
-        if (!is_array($method)) {
-            continue;
-        }
-
-        $code = mb_strtolower(trim((string)($method['code'] ?? '')));
-        $name = trim((string)($method['name'] ?? ''));
-        $accountName = trim((string)($method['account_name'] ?? ''));
-        $accountNumber = trim((string)($method['account_number'] ?? ''));
-
-        if ($code === '' || $name === '' || $accountNumber === '') {
-            continue;
-        }
-
-        $normalized[] = [
-            'code' => $code,
-            'name' => $name,
-            'account_name' => $accountName,
-            'account_number' => $accountNumber,
-            'note' => trim((string)($method['note'] ?? '')),
-        ];
-    }
-
-    if ($normalized !== []) {
-        return $normalized;
-    }
+    $payment = (array)($config['payment'] ?? []);
+    $receiverName = trim((string)($payment['qris_receiver_name'] ?? 'Odyssiavault'));
+    $accountNumber = trim((string)($payment['qris_account_number'] ?? 'Scan QRIS'));
+    $note = trim((string)($payment['qris_note'] ?? 'Pembayaran hanya melalui QRIS.'));
 
     return [
         [
-            'code' => 'bca',
-            'name' => 'Bank BCA',
-            'account_name' => 'Odyssiavault',
-            'account_number' => 'ISI_REKENING_BCA',
-            'note' => '',
-        ],
-        [
-            'code' => 'dana',
-            'name' => 'DANA',
-            'account_name' => 'Odyssiavault',
-            'account_number' => 'ISI_NOMOR_DANA',
-            'note' => '',
-        ],
-        [
-            'code' => 'gopay',
-            'name' => 'GoPay',
-            'account_name' => 'Odyssiavault',
-            'account_number' => 'ISI_NOMOR_GOPAY',
-            'note' => '',
+            'code' => 'qris',
+            'name' => 'QRIS',
+            'account_name' => $receiverName !== '' ? $receiverName : 'Odyssiavault',
+            'account_number' => $accountNumber !== '' ? $accountNumber : 'Scan QRIS',
+            'note' => $note,
         ],
     ];
+}
+
+function parseLooseBool($value, bool $default = false): bool
+{
+    if (is_bool($value)) {
+        return $value;
+    }
+
+    if ($value === null) {
+        return $default;
+    }
+
+    $normalized = mb_strtolower(trim((string)$value));
+    if ($normalized === '') {
+        return $default;
+    }
+
+    if (in_array($normalized, ['1', 'true', 'yes', 'on'], true)) {
+        return true;
+    }
+
+    if (in_array($normalized, ['0', 'false', 'no', 'off'], true)) {
+        return false;
+    }
+
+    return $default;
+}
+
+function rateLimitAllow(string $key, int $maxRequests, int $windowSeconds, ?int &$retryAfterSeconds = null): bool
+{
+    $retryAfterSeconds = null;
+
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        return true;
+    }
+
+    $key = trim($key);
+    if ($key === '') {
+        return true;
+    }
+
+    $maxRequests = max(1, $maxRequests);
+    $windowSeconds = max(1, $windowSeconds);
+    $now = time();
+
+    $bucketStore = $_SESSION['__rate_limit'] ?? [];
+    if (!is_array($bucketStore)) {
+        $bucketStore = [];
+    }
+
+    $bucket = $bucketStore[$key] ?? null;
+    if (!is_array($bucket)) {
+        $bucket = [
+            'start' => $now,
+            'count' => 0,
+        ];
+    }
+
+    $start = (int)($bucket['start'] ?? $now);
+    $count = (int)($bucket['count'] ?? 0);
+
+    if (($now - $start) >= $windowSeconds) {
+        $start = $now;
+        $count = 0;
+    }
+
+    $count++;
+    $bucketStore[$key] = [
+        'start' => $start,
+        'count' => $count,
+    ];
+
+    // Keep store compact.
+    if (count($bucketStore) > 80) {
+        $bucketStore = array_slice($bucketStore, -60, null, true);
+    }
+
+    $_SESSION['__rate_limit'] = $bucketStore;
+
+    if ($count <= $maxRequests) {
+        return true;
+    }
+
+    $retryAfterSeconds = max(1, $windowSeconds - ($now - $start));
+    return false;
+}
+
+function normalizeWhatsAppRecipient(string $raw): string
+{
+    $digits = preg_replace('/\D+/', '', trim($raw));
+    if ($digits === null || $digits === '') {
+        return '';
+    }
+
+    // Indonesia number normalization:
+    // 0812...  -> 62812...
+    // 812...   -> 62812...
+    // +62812.. -> 62812...
+    if (str_starts_with($digits, '00')) {
+        $digits = substr($digits, 2);
+    }
+
+    if (str_starts_with($digits, '0')) {
+        $digits = '62' . substr($digits, 1);
+    } elseif (str_starts_with($digits, '8')) {
+        $digits = '62' . $digits;
+    }
+
+    if (strlen($digits) < 10 || strlen($digits) > 18) {
+        return '';
+    }
+
+    return $digits;
+}
+
+function normalizeWhatsAppRecipients(string $raw): array
+{
+    $raw = trim($raw);
+    if ($raw === '') {
+        return [];
+    }
+
+    $parts = preg_split('/[\s,;]+/', $raw) ?: [];
+    $targets = [];
+    foreach ($parts as $part) {
+        $recipient = normalizeWhatsAppRecipient((string)$part);
+        if ($recipient === '') {
+            continue;
+        }
+
+        $targets[$recipient] = true;
+    }
+
+    return array_keys($targets);
+}
+
+function formatRupiahInt($amount): string
+{
+    return 'Rp ' . number_format((int)round((float)$amount), 0, ',', '.');
+}
+
+/**
+ * @param list<string> $responseHeaders
+ */
+function extractHttpStatusFromHeaders(array $responseHeaders): int
+{
+    foreach ($responseHeaders as $headerLine) {
+        if (!is_string($headerLine)) {
+            continue;
+        }
+
+        if (preg_match('/^HTTP\/\d+(?:\.\d+)?\s+(\d{3})/i', trim($headerLine), $matches) === 1) {
+            return (int)$matches[1];
+        }
+    }
+
+    return 0;
+}
+
+function httpRequestViaStream(string $method, string $url, ?string $body, array $headers = [], int $timeoutSeconds = 6): array
+{
+    $normalizedMethod = strtoupper(trim($method));
+    if ($normalizedMethod === '') {
+        $normalizedMethod = 'GET';
+    }
+
+    $headerLines = [];
+    foreach ($headers as $name => $value) {
+        if (!is_string($name) || trim($name) === '') {
+            continue;
+        }
+        $headerLines[] = trim($name) . ': ' . (string)$value;
+    }
+
+    $httpOptions = [
+        'method' => $normalizedMethod,
+        'timeout' => max(3, $timeoutSeconds),
+        'ignore_errors' => true,
+        'header' => implode("\r\n", $headerLines),
+    ];
+
+    if ($body !== null) {
+        $httpOptions['content'] = $body;
+    }
+
+    $context = stream_context_create([
+        'http' => $httpOptions,
+        'ssl' => [
+            'verify_peer' => true,
+            'verify_peer_name' => true,
+        ],
+    ]);
+
+    $result = @file_get_contents($url, false, $context);
+    $responseHeaders = isset($http_response_header) && is_array($http_response_header)
+        ? $http_response_header
+        : [];
+    $status = extractHttpStatusFromHeaders($responseHeaders);
+
+    if ($result === false) {
+        $err = error_get_last();
+        $msg = is_array($err) ? (string)($err['message'] ?? 'Stream request failed.') : 'Stream request failed.';
+        return ['ok' => false, 'status' => $status, 'body' => $msg];
+    }
+
+    $bodyText = is_string($result) ? $result : '';
+    return ['ok' => $status >= 200 && $status < 300, 'status' => $status, 'body' => $bodyText];
+}
+
+function httpPostUrlEncoded(string $url, array $payload, array $headers = [], int $timeoutSeconds = 6): array
+{
+    $streamHeaders = array_merge($headers, [
+        'Content-Type' => 'application/x-www-form-urlencoded',
+        'Accept' => 'application/json',
+    ]);
+    $streamBody = http_build_query($payload);
+
+    if (!function_exists('curl_init')) {
+        return httpRequestViaStream('POST', $url, $streamBody, $streamHeaders, $timeoutSeconds);
+    }
+
+    $ch = curl_init($url);
+    if ($ch === false) {
+        return ['ok' => false, 'status' => 0, 'body' => 'Unable to initialize cURL'];
+    }
+
+    $normalizedHeaders = [];
+    foreach ($headers as $name => $value) {
+        $normalizedHeaders[] = $name . ': ' . $value;
+    }
+    $normalizedHeaders[] = 'Content-Type: application/x-www-form-urlencoded';
+
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_CONNECTTIMEOUT => 4,
+        CURLOPT_TIMEOUT => max(3, $timeoutSeconds),
+        CURLOPT_HTTPHEADER => $normalizedHeaders,
+        CURLOPT_POSTFIELDS => $streamBody,
+    ]);
+
+    $result = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $errNo = curl_errno($ch);
+    $errMsg = curl_error($ch);
+    curl_close($ch);
+
+    if ($errNo !== 0) {
+        $fallback = httpRequestViaStream('POST', $url, $streamBody, $streamHeaders, $timeoutSeconds);
+        if (($fallback['ok'] ?? false) === true) {
+            return $fallback;
+        }
+        return ['ok' => false, 'status' => $status, 'body' => $errMsg];
+    }
+
+    $body = is_string($result) ? $result : '';
+    return ['ok' => $status >= 200 && $status < 300, 'status' => $status, 'body' => $body];
+}
+
+function httpPostJson(string $url, array $payload, array $headers = [], int $timeoutSeconds = 6): array
+{
+    $streamHeaders = array_merge($headers, [
+        'Content-Type' => 'application/json',
+        'Accept' => 'application/json',
+    ]);
+    $jsonPayload = json_encode($payload, JSON_UNESCAPED_UNICODE);
+    if (!is_string($jsonPayload)) {
+        $jsonPayload = '{}';
+    }
+
+    if (!function_exists('curl_init')) {
+        return httpRequestViaStream('POST', $url, $jsonPayload, $streamHeaders, $timeoutSeconds);
+    }
+
+    $ch = curl_init($url);
+    if ($ch === false) {
+        return ['ok' => false, 'status' => 0, 'body' => 'Unable to initialize cURL'];
+    }
+
+    $normalizedHeaders = [];
+    foreach ($headers as $name => $value) {
+        $normalizedHeaders[] = $name . ': ' . $value;
+    }
+    $normalizedHeaders[] = 'Content-Type: application/json';
+
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_CONNECTTIMEOUT => 4,
+        CURLOPT_TIMEOUT => max(3, $timeoutSeconds),
+        CURLOPT_HTTPHEADER => $normalizedHeaders,
+        CURLOPT_POSTFIELDS => $jsonPayload,
+    ]);
+
+    $result = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $errNo = curl_errno($ch);
+    $errMsg = curl_error($ch);
+    curl_close($ch);
+
+    if ($errNo !== 0) {
+        $fallback = httpRequestViaStream('POST', $url, $jsonPayload, $streamHeaders, $timeoutSeconds);
+        if (($fallback['ok'] ?? false) === true) {
+            return $fallback;
+        }
+        return ['ok' => false, 'status' => $status, 'body' => $errMsg];
+    }
+
+    $body = is_string($result) ? $result : '';
+    return ['ok' => $status >= 200 && $status < 300, 'status' => $status, 'body' => $body];
+}
+
+function httpGet(string $url, array $headers = [], int $timeoutSeconds = 6): array
+{
+    $streamHeaders = array_merge($headers, [
+        'Accept' => 'application/json,text/plain,*/*',
+    ]);
+
+    if (!function_exists('curl_init')) {
+        return httpRequestViaStream('GET', $url, null, $streamHeaders, $timeoutSeconds);
+    }
+
+    $ch = curl_init($url);
+    if ($ch === false) {
+        return ['ok' => false, 'status' => 0, 'body' => 'Unable to initialize cURL'];
+    }
+
+    $normalizedHeaders = [];
+    foreach ($headers as $name => $value) {
+        $normalizedHeaders[] = $name . ': ' . $value;
+    }
+
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_CONNECTTIMEOUT => 4,
+        CURLOPT_TIMEOUT => max(3, $timeoutSeconds),
+        CURLOPT_HTTPHEADER => $normalizedHeaders,
+    ]);
+
+    $result = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $errNo = curl_errno($ch);
+    $errMsg = curl_error($ch);
+    curl_close($ch);
+
+    if ($errNo !== 0) {
+        $fallback = httpRequestViaStream('GET', $url, null, $streamHeaders, $timeoutSeconds);
+        if (($fallback['ok'] ?? false) === true) {
+            return $fallback;
+        }
+        return ['ok' => false, 'status' => $status, 'body' => $errMsg];
+    }
+
+    $body = is_string($result) ? $result : '';
+    return ['ok' => $status >= 200 && $status < 300, 'status' => $status, 'body' => $body];
+}
+
+function discoverTelegramChatIds(string $botToken, int $timeoutSeconds = 6): array
+{
+    $botToken = trim($botToken);
+    if ($botToken === '') {
+        return [];
+    }
+
+    $url = 'https://api.telegram.org/bot' . $botToken . '/getUpdates?limit=20&timeout=0';
+    $result = httpGet($url, [], $timeoutSeconds);
+    if (!($result['ok'] ?? false)) {
+        return [];
+    }
+
+    $body = (string)($result['body'] ?? '');
+    $decoded = json_decode($body, true);
+    if (!is_array($decoded) || ($decoded['ok'] ?? false) !== true || !is_array($decoded['result'] ?? null)) {
+        return [];
+    }
+
+    $chatIds = [];
+    foreach ($decoded['result'] as $update) {
+        if (!is_array($update)) {
+            continue;
+        }
+
+        $containers = [];
+        foreach (['message', 'edited_message', 'channel_post', 'edited_channel_post', 'my_chat_member', 'chat_member'] as $key) {
+            if (isset($update[$key]) && is_array($update[$key])) {
+                $containers[] = $update[$key];
+            }
+        }
+
+        foreach ($containers as $container) {
+            $chat = (isset($container['chat']) && is_array($container['chat'])) ? $container['chat'] : null;
+            if (!$chat) {
+                continue;
+            }
+
+            $candidate = isset($chat['id']) ? (string)$chat['id'] : '';
+            if ($candidate === '') {
+                continue;
+            }
+
+            $normalized = normalizeTelegramChatId($candidate);
+            if ($normalized === '') {
+                continue;
+            }
+
+            $chatIds[$normalized] = true;
+        }
+    }
+
+    return array_values(array_map(static function ($value): string {
+        return (string)$value;
+    }, array_keys($chatIds)));
+}
+
+function buildAdminPendingPaymentMessage(array $context, array $config): string
+{
+    $orderId = (int)($context['order_id'] ?? 0);
+    $username = trim((string)($context['username'] ?? '-'));
+    $serviceName = trim((string)($context['service_name'] ?? '-'));
+    $target = trim((string)($context['target'] ?? '-'));
+    $quantity = (int)($context['quantity'] ?? 0);
+    $total = (int)($context['total_sell_price'] ?? 0);
+    $methodName = trim((string)($context['payment_method_name'] ?? 'QRIS'));
+    $paymentState = trim((string)($context['payment_state'] ?? 'Menunggu Konfirmasi'));
+    $payerName = trim((string)($context['payer_name'] ?? ''));
+    $reference = trim((string)($context['payment_reference'] ?? ''));
+    $confirmedAt = trim((string)($context['confirmed_at'] ?? nowDateTime()));
+
+    $baseUrl = trim((string)(($config['app'] ?? [])['base_url'] ?? ''));
+    $adminUrl = $baseUrl !== '' ? rtrim($baseUrl, '/') . '/?page=admin' : '';
+
+    $lines = [
+        'Notifikasi Admin - Konfirmasi Pembayaran Baru',
+        'Order ID: #' . ($orderId > 0 ? (string)$orderId : '-'),
+        'User: @' . ($username !== '' ? $username : '-'),
+        'Layanan: ' . ($serviceName !== '' ? $serviceName : '-'),
+        'Target: ' . ($target !== '' ? $target : '-'),
+        'Jumlah: ' . number_format(max(0, $quantity), 0, ',', '.'),
+        'Total: ' . formatRupiahInt($total),
+        'Metode: ' . ($methodName !== '' ? $methodName : 'QRIS'),
+        'Status Pembayaran: ' . ($paymentState !== '' ? $paymentState : 'Menunggu Konfirmasi'),
+        'Nama Pengirim: ' . ($payerName !== '' ? $payerName : '-'),
+        'Referensi: ' . ($reference !== '' ? $reference : '-'),
+        'Waktu Konfirmasi: ' . $confirmedAt,
+    ];
+
+    if ($adminUrl !== '') {
+        $lines[] = 'Panel Admin: ' . $adminUrl;
+    }
+
+    return implode("\n", $lines);
+}
+
+function notifyAdminWhatsAppPendingPayment(array $config, array $context): void
+{
+    try {
+        $notifications = (array)($config['notifications'] ?? []);
+        $wa = (isset($notifications['whatsapp']) && is_array($notifications['whatsapp']))
+            ? (array)$notifications['whatsapp']
+            : $notifications;
+
+        $enabledRaw = readEnvValue('WHATSAPP_ADMIN_NOTIFY_ENABLED', '');
+        $enabled = $enabledRaw !== ''
+            ? parseLooseBool($enabledRaw, false)
+            : parseLooseBool($wa['enabled'] ?? false, false);
+        if (!$enabled) {
+            return;
+        }
+
+        $provider = mb_strtolower(trim(envValueOrConfig('WHATSAPP_PROVIDER', (string)($wa['provider'] ?? 'fonnte'))));
+        if ($provider === '') {
+            $provider = 'fonnte';
+        }
+
+        $targetsRaw = trim(envValueOrConfig('WHATSAPP_ADMIN_PHONE', (string)($wa['admin_phone'] ?? '')));
+        $targets = normalizeWhatsAppRecipients($targetsRaw);
+        if ($targets === []) {
+            error_log('WhatsApp admin notify skipped: WHATSAPP_ADMIN_PHONE empty/invalid.');
+            return;
+        }
+
+        $message = buildAdminPendingPaymentMessage($context, $config);
+        $timeoutRaw = envValueOrConfig('WHATSAPP_TIMEOUT', (string)($wa['timeout'] ?? '6'));
+        $timeout = (int)$timeoutRaw;
+        if ($timeout <= 0) {
+            $timeout = 6;
+        }
+
+        if ($provider === 'fonnte') {
+            $token = trim(envValueOrConfig('WHATSAPP_FONNTE_TOKEN', (string)($wa['fonnte_token'] ?? '')));
+            if ($token === '') {
+                error_log('WhatsApp admin notify skipped: WHATSAPP_FONNTE_TOKEN kosong.');
+                return;
+            }
+
+            foreach ($targets as $target) {
+                $result = httpPostUrlEncoded(
+                    'https://api.fonnte.com/send',
+                    [
+                        'target' => $target,
+                        'message' => $message,
+                    ],
+                    ['Authorization' => $token],
+                    $timeout
+                );
+                if (!($result['ok'] ?? false)) {
+                    error_log('WhatsApp Fonnte notify failed. Target: ' . $target . ' HTTP: ' . (string)($result['status'] ?? 0));
+                }
+            }
+
+            return;
+        }
+
+        if ($provider === 'webhook') {
+            $webhookUrl = trim(envValueOrConfig('WHATSAPP_WEBHOOK_URL', (string)($wa['webhook_url'] ?? '')));
+            if ($webhookUrl === '') {
+                error_log('WhatsApp admin notify skipped: WHATSAPP_WEBHOOK_URL kosong.');
+                return;
+            }
+
+            $webhookSecret = trim(envValueOrConfig('WHATSAPP_WEBHOOK_SECRET', (string)($wa['webhook_secret'] ?? '')));
+            $headers = [];
+            if ($webhookSecret !== '') {
+                $headers['X-Webhook-Secret'] = $webhookSecret;
+            }
+
+            foreach ($targets as $target) {
+                $result = httpPostJson(
+                    $webhookUrl,
+                    [
+                        'event' => 'order_waiting_admin_confirmation',
+                        'to' => $target,
+                        'message' => $message,
+                        'order' => $context,
+                    ],
+                    $headers,
+                    $timeout
+                );
+                if (!($result['ok'] ?? false)) {
+                    error_log('WhatsApp webhook notify failed. Target: ' . $target . ' HTTP: ' . (string)($result['status'] ?? 0));
+                }
+            }
+
+            return;
+        }
+
+        error_log('WhatsApp admin notify skipped: provider tidak didukung (' . $provider . ').');
+    } catch (Throwable $e) {
+        error_log('WhatsApp admin notify error: ' . $e->getMessage());
+    }
+}
+
+function normalizeTelegramChatId(string $raw): string
+{
+    $value = trim($raw);
+    if ($value === '') {
+        return '';
+    }
+
+    if (preg_match('/^-?\d{5,25}$/', $value) === 1) {
+        return $value;
+    }
+
+    if (preg_match('/^@[A-Za-z0-9_]{5,64}$/', $value) === 1) {
+        return $value;
+    }
+
+    return '';
+}
+
+function normalizeTelegramChatIds(string $raw): array
+{
+    $raw = trim($raw);
+    if ($raw === '') {
+        return [];
+    }
+
+    $parts = preg_split('/[\s,;]+/', $raw) ?: [];
+    $targets = [];
+    foreach ($parts as $part) {
+        $chatId = normalizeTelegramChatId((string)$part);
+        if ($chatId === '') {
+            continue;
+        }
+
+        $targets[$chatId] = true;
+    }
+
+    return array_values(array_map(static function ($value): string {
+        return (string)$value;
+    }, array_keys($targets)));
+}
+
+function trimTelegramMessage(string $message, int $maxLength = 3900): string
+{
+    $normalized = trim(str_replace(["\r\n", "\r"], "\n", $message));
+    if ($normalized === '') {
+        return '';
+    }
+
+    if ($maxLength < 200) {
+        $maxLength = 200;
+    }
+
+    if (mb_strlen($normalized) <= $maxLength) {
+        return $normalized;
+    }
+
+    $truncated = mb_substr($normalized, 0, $maxLength - 3);
+    return rtrim($truncated) . '...';
+}
+
+function parseTelegramApiResponse(array $result): array
+{
+    $status = (int)($result['status'] ?? 0);
+    $body = (string)($result['body'] ?? '');
+
+    $decoded = json_decode($body, true);
+    if (is_array($decoded)) {
+        $ok = ($decoded['ok'] ?? false) === true;
+        $description = trim((string)($decoded['description'] ?? ''));
+
+        return [
+            'ok' => $ok,
+            'status' => $status,
+            'description' => $description,
+            'body' => $body,
+        ];
+    }
+
+    return [
+        'ok' => ($result['ok'] ?? false) === true,
+        'status' => $status,
+        'description' => '',
+        'body' => $body,
+    ];
+}
+
+function sendTelegramMessage(string $botToken, string $chatId, string $message, bool $disablePreview, int $timeout): array
+{
+    $url = 'https://api.telegram.org/bot' . $botToken . '/sendMessage';
+    $payload = [
+        'chat_id' => $chatId,
+        'text' => $message,
+        'disable_web_page_preview' => $disablePreview ? 'true' : 'false',
+    ];
+
+    $first = parseTelegramApiResponse(httpPostUrlEncoded($url, $payload, [], $timeout));
+    if ($first['ok']) {
+        return $first;
+    }
+
+    // Fallback GET: beberapa hosting gratis sering bermasalah pada body POST.
+    $queryUrl = $url . '?' . http_build_query($payload);
+    $second = parseTelegramApiResponse(httpGet($queryUrl, [], $timeout));
+    if ($second['ok']) {
+        return $second;
+    }
+
+    return $first;
+}
+
+function notifyAdminTelegramPendingPayment(array $config, array $context): void
+{
+    try {
+        $notifications = (array)($config['notifications'] ?? []);
+        $tg = (isset($notifications['telegram']) && is_array($notifications['telegram']))
+            ? (array)$notifications['telegram']
+            : $notifications;
+
+        $enabledRaw = readEnvValue('TELEGRAM_ADMIN_NOTIFY_ENABLED', '');
+        $enabled = $enabledRaw !== ''
+            ? parseLooseBool($enabledRaw, false)
+            : parseLooseBool($tg['enabled'] ?? false, false);
+        if (!$enabled) {
+            return;
+        }
+
+        $botToken = trim(envValueOrConfig('TELEGRAM_BOT_TOKEN', (string)($tg['bot_token'] ?? '')));
+        if ($botToken === '') {
+            error_log('Telegram admin notify skipped: TELEGRAM_BOT_TOKEN kosong.');
+            return;
+        }
+
+        $timeoutRaw = envValueOrConfig('TELEGRAM_TIMEOUT', (string)($tg['timeout'] ?? '6'));
+        $timeout = (int)$timeoutRaw;
+        if ($timeout <= 0) {
+            $timeout = 6;
+        }
+
+        $chatIdsRaw = trim(envValueOrConfig('TELEGRAM_ADMIN_CHAT_ID', (string)($tg['chat_id'] ?? '')));
+        $chatIds = normalizeTelegramChatIds($chatIdsRaw);
+        if ($chatIds === []) {
+            $chatIds = discoverTelegramChatIds($botToken, $timeout);
+            if ($chatIds === []) {
+                error_log('Telegram admin notify skipped: TELEGRAM_ADMIN_CHAT_ID kosong/invalid dan auto-detect belum menemukan chat.');
+                return;
+            }
+        }
+
+        $disablePreviewRaw = readEnvValue('TELEGRAM_DISABLE_WEB_PAGE_PREVIEW', '');
+        $disablePreview = $disablePreviewRaw !== ''
+            ? parseLooseBool($disablePreviewRaw, true)
+            : parseLooseBool($tg['disable_web_page_preview'] ?? true, true);
+
+        $message = trimTelegramMessage(buildAdminPendingPaymentMessage($context, $config), 3900);
+        if ($message === '') {
+            error_log('Telegram admin notify skipped: message empty after normalization.');
+            return;
+        }
+
+        $sent = false;
+        $failedChatIds = [];
+
+        foreach ($chatIds as $chatId) {
+            $chatId = (string)$chatId;
+            $result = sendTelegramMessage($botToken, $chatId, $message, $disablePreview, $timeout);
+            if (!($result['ok'] ?? false)) {
+                $description = trim((string)($result['description'] ?? ''));
+                $status = (int)($result['status'] ?? 0);
+                $snippet = mb_substr(trim((string)($result['body'] ?? '')), 0, 220);
+                $failedChatIds[$chatId] = true;
+                error_log(
+                    'Telegram notify failed. Chat: ' . $chatId
+                    . ' HTTP: ' . $status
+                    . ($description !== '' ? ' Desc: ' . $description : '')
+                    . ($snippet !== '' ? ' Body: ' . $snippet : '')
+                );
+                continue;
+            }
+
+            $sent = true;
+        }
+
+        // Jika semua chat_id gagal (umumnya chat_id salah / bot belum start),
+        // coba fallback auto-discovery dari getUpdates agar notifikasi tetap terkirim.
+        if (!$sent && $chatIdsRaw !== '') {
+            $fallbackChatIds = discoverTelegramChatIds($botToken, $timeout);
+            if ($fallbackChatIds !== []) {
+                foreach ($fallbackChatIds as $chatId) {
+                    $chatId = (string)$chatId;
+                    if (isset($failedChatIds[$chatId])) {
+                        continue;
+                    }
+
+                    $result = sendTelegramMessage($botToken, $chatId, $message, $disablePreview, $timeout);
+                    if (!($result['ok'] ?? false)) {
+                        $description = trim((string)($result['description'] ?? ''));
+                        $status = (int)($result['status'] ?? 0);
+                        $snippet = mb_substr(trim((string)($result['body'] ?? '')), 0, 220);
+                        error_log(
+                            'Telegram notify fallback failed. Chat: ' . $chatId
+                            . ' HTTP: ' . $status
+                            . ($description !== '' ? ' Desc: ' . $description : '')
+                            . ($snippet !== '' ? ' Body: ' . $snippet : '')
+                        );
+                        continue;
+                    }
+
+                    $sent = true;
+                }
+            }
+        }
+
+        if (!$sent) {
+            error_log('Telegram admin notify failed: no successful deliveries.');
+        }
+    } catch (Throwable $e) {
+        error_log('Telegram admin notify error: ' . $e->getMessage());
+    }
+}
+
+function notifyAdminPendingPaymentChannels(array $config, array $context): void
+{
+    notifyAdminWhatsAppPendingPayment($config, $context);
+    notifyAdminTelegramPendingPayment($config, $context);
+}
+
+function ensureTicketTables(PDO $pdo): bool
+{
+    $tableExists = static function (string $table) use ($pdo): bool {
+        $table = trim($table);
+        if ($table === '') {
+            return false;
+        }
+
+        try {
+            $stmt = $pdo->prepare(
+                'SELECT 1
+                 FROM information_schema.tables
+                 WHERE table_schema = DATABASE()
+                   AND table_name = :table
+                 LIMIT 1'
+            );
+            $stmt->execute(['table' => $table]);
+            if ((bool)$stmt->fetchColumn()) {
+                return true;
+            }
+        } catch (Throwable $e) {
+            // Ignore and continue with fallback checks.
+        }
+
+        try {
+            $stmt = $pdo->prepare('SHOW TABLES LIKE :table');
+            $stmt->execute(['table' => $table]);
+            if ($stmt->fetchColumn() !== false) {
+                return true;
+            }
+        } catch (Throwable $e) {
+            // Ignore and continue with final fallback.
+        }
+
+        try {
+            $safeTable = str_replace('`', '``', $table);
+            $pdo->query("SELECT 1 FROM `{$safeTable}` LIMIT 1");
+            return true;
+        } catch (Throwable $e) {
+            return false;
+        }
+    };
+
+    try {
+        $hasTickets = $tableExists('tickets');
+        $hasTicketMessages = $tableExists('ticket_messages');
+        if ($hasTickets && $hasTicketMessages) {
+            return true;
+        }
+
+        // Use a compatible schema first (without FK) so older/limited DB setups can still run tickets.
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS tickets (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                user_id INT UNSIGNED NOT NULL,
+                order_id BIGINT UNSIGNED NULL,
+                subject VARCHAR(180) NOT NULL,
+                category VARCHAR(80) NOT NULL DEFAULT 'Laporan',
+                priority ENUM('low', 'normal', 'high', 'urgent') NOT NULL DEFAULT 'normal',
+                status ENUM('open', 'answered', 'closed') NOT NULL DEFAULT 'open',
+                last_message_at DATETIME NOT NULL,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                INDEX idx_tickets_user_created (user_id, created_at),
+                INDEX idx_tickets_status_updated (status, updated_at),
+                INDEX idx_tickets_last_message (last_message_at)
+            ) ENGINE=InnoDB"
+        );
+
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS ticket_messages (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                ticket_id BIGINT UNSIGNED NOT NULL,
+                user_id INT UNSIGNED NOT NULL,
+                sender_role ENUM('user', 'admin') NOT NULL DEFAULT 'user',
+                message TEXT NOT NULL,
+                created_at DATETIME NOT NULL,
+                INDEX idx_ticket_messages_ticket_created (ticket_id, created_at),
+                INDEX idx_ticket_messages_user_created (user_id, created_at)
+            ) ENGINE=InnoDB"
+        );
+
+        $hasTickets = $tableExists('tickets');
+        $hasTicketMessages = $tableExists('ticket_messages');
+        return $hasTickets && $hasTicketMessages;
+    } catch (Throwable $e) {
+        error_log('Ensure ticket tables failed: ' . $e->getMessage());
+        return false;
+    }
 }
 
 function insertBalanceTransaction(

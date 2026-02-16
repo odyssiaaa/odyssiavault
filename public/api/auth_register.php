@@ -8,6 +8,14 @@ $input = getRequestInput();
 $username = trim((string)($input['username'] ?? ''));
 $password = (string)($input['password'] ?? '');
 
+$retryAfter = null;
+if (!rateLimitAllow('auth_register', 6, 300, $retryAfter)) {
+    jsonResponse([
+        'status' => false,
+        'data' => ['msg' => 'Terlalu banyak percobaan registrasi. Coba lagi nanti.'],
+    ], 429);
+}
+
 if (!preg_match('/^[a-zA-Z0-9_]{4,30}$/', $username)) {
     jsonResponse([
         'status' => false,

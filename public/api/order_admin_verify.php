@@ -9,6 +9,14 @@ requireAdmin($user);
 expireUnpaidOrders($pdo);
 
 $input = getRequestInput();
+$retryAfter = null;
+if (!rateLimitAllow('admin_order_verify', 40, 60, $retryAfter)) {
+    jsonResponse([
+        'status' => false,
+        'data' => ['msg' => 'Permintaan verifikasi terlalu cepat. Coba lagi beberapa saat.'],
+    ], 429);
+}
+
 $orderId = sanitizeQuantity($input['order_id'] ?? '');
 $action = mb_strtolower(trim((string)($input['action'] ?? '')));
 $adminNote = trim((string)($input['admin_note'] ?? ''));
@@ -70,7 +78,7 @@ try {
         $pdo->rollBack();
         jsonResponse([
             'status' => false,
-            'data' => ['msg' => 'Konfigurasi provider belum diisi (config/env).'],
+            'data' => ['msg' => 'Konfigurasi server layanan belum diisi (config/env).'],
         ], 500);
     }
 
@@ -79,13 +87,13 @@ try {
         $pdo->rollBack();
         jsonResponse([
             'status' => false,
-            'data' => ['msg' => 'Payload order provider tidak valid.'],
+            'data' => ['msg' => 'Payload order server layanan tidak valid.'],
         ], 500);
     }
 
     $providerResult = $client->order($payload);
     if (!($providerResult['status'] ?? false)) {
-        $providerMsg = (string)($providerResult['data']['msg'] ?? 'Provider gagal memproses order.');
+        $providerMsg = (string)($providerResult['data']['msg'] ?? 'Server layanan gagal memproses order.');
         $pdo->rollBack();
         jsonResponse([
             'status' => false,
@@ -98,7 +106,7 @@ try {
         $pdo->rollBack();
         jsonResponse([
             'status' => false,
-            'data' => ['msg' => 'Provider tidak mengembalikan ID order.'],
+            'data' => ['msg' => 'Server layanan tidak mengembalikan ID order.'],
         ], 400);
     }
 

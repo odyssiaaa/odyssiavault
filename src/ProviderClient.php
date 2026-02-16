@@ -25,6 +25,23 @@ final class ProviderClient
         }
         $this->servicesCacheTtl = max(0, (int)($config['services_cache_ttl'] ?? 300));
         $this->cacheDir = (string)($config['cache_dir'] ?? (dirname(__DIR__) . '/storage/cache/provider'));
+        if ($this->cacheDir === '') {
+            $this->cacheDir = dirname(__DIR__) . '/storage/cache/provider';
+        }
+
+        if (!is_dir($this->cacheDir)) {
+            @mkdir($this->cacheDir, 0777, true);
+        }
+
+        if (!is_dir($this->cacheDir) || !is_writable($this->cacheDir)) {
+            $tmpCacheDir = rtrim((string)sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'odyssiavault_provider_cache';
+            if (!is_dir($tmpCacheDir)) {
+                @mkdir($tmpCacheDir, 0777, true);
+            }
+            if (is_dir($tmpCacheDir) && is_writable($tmpCacheDir)) {
+                $this->cacheDir = $tmpCacheDir;
+            }
+        }
     }
 
     public function isConfigured(): bool
@@ -43,81 +60,84 @@ final class ProviderClient
         $action = mb_strtolower(trim((string)($payload['action'] ?? '')));
         $timeout = $this->timeout;
         if (str_starts_with($action, 'services')) {
-            $timeout = max($timeout, 90);
+            $timeout = max($timeout, 60);
         }
 
-        $ch = curl_init($this->apiUrl);
-        $headers = ['Accept: application/json'];
-        $postBody = http_build_query($payload);
-
-        if ($this->requestContentType === 'json') {
-            $headers[] = 'Content-Type: application/json';
-            $postBody = json_encode($payload, JSON_UNESCAPED_UNICODE);
+        $preferredType = $this->requestContentType;
+        $alternateType = $preferredType === 'json' ? 'form' : 'json';
+        $firstResult = $this->sendRequest($payload, $timeout, $preferredType);
+        if (($firstResult['status'] ?? false) === true) {
+            return $firstResult;
         }
 
-        curl_setopt_array($ch, [
-            CURLOPT_POST => true,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => $timeout,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_POSTFIELDS => $postBody,
-        ]);
+        $firstMsg = mb_strtolower(trim((string)($firstResult['data']['msg'] ?? '')));
+        $isMutatingAction = in_array($action, ['order', 'refill'], true);
+        $shouldRetryWithAlternateType = $isMutatingAction
+            ? $this->isRequestFormatError($firstMsg)
+            : $this->isRetryableRequestFailure($firstMsg);
 
-        $result = curl_exec($ch);
-        $error = curl_error($ch);
-        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        if ($result === false) {
-            return [
-                'status' => false,
-                'data' => ['msg' => 'Gagal koneksi ke provider: ' . $error],
-            ];
+        if (!$shouldRetryWithAlternateType) {
+            return $firstResult;
         }
 
-        $decoded = json_decode($result, true);
-        if (!is_array($decoded)) {
-            return [
-                'status' => false,
-                'data' => ['msg' => 'Respon provider bukan JSON valid. HTTP ' . $status],
-            ];
+        $secondResult = $this->sendRequest($payload, $timeout, $alternateType);
+        if (($secondResult['status'] ?? false) === true) {
+            return $secondResult;
         }
 
-        return $decoded;
+        return $firstResult;
     }
 
     public function services(string $action = 'services'): array
     {
-        if ($this->servicesCacheTtl > 0 && isset($this->servicesMemoryCache[$action])) {
-            return $this->servicesMemoryCache[$action];
-        }
+        $variants = $this->serviceActionFallbackChain($action);
+        $lastResult = [
+            'status' => false,
+            'data' => ['msg' => 'Gagal mengambil daftar layanan.'],
+        ];
 
-        if ($this->servicesCacheTtl > 0) {
-            $cached = $this->readServicesCache($action, true);
-            if (is_array($cached)) {
-                $this->servicesMemoryCache[$action] = $cached;
-                return $cached;
+        foreach ($variants as $variant) {
+            if ($this->servicesCacheTtl > 0 && isset($this->servicesMemoryCache[$variant])) {
+                return $this->servicesMemoryCache[$variant];
             }
-        }
 
-        $result = $this->request(['action' => $action]);
-        if (($result['status'] ?? false) === true) {
             if ($this->servicesCacheTtl > 0) {
-                $this->writeServicesCache($action, $result);
+                $cached = $this->readServicesCache($variant, true);
+                if (is_array($cached)) {
+                    $this->servicesMemoryCache[$variant] = $cached;
+                    $this->servicesMemoryCache[$action] = $cached;
+                    return $cached;
+                }
             }
-            $this->servicesMemoryCache[$action] = $result;
-            return $result;
+
+            $result = $this->request(['action' => $variant]);
+            if (($result['status'] ?? false) === true) {
+                if ($this->servicesCacheTtl > 0) {
+                    $this->writeServicesCache($variant, $result);
+                    if ($variant !== $action) {
+                        $this->writeServicesCache($action, $result);
+                    }
+                }
+                $this->servicesMemoryCache[$variant] = $result;
+                $this->servicesMemoryCache[$action] = $result;
+                return $result;
+            }
+
+            $lastResult = $result;
         }
 
         if ($this->servicesCacheTtl > 0) {
-            $stale = $this->readServicesCache($action, false);
-            if (is_array($stale)) {
-                $this->servicesMemoryCache[$action] = $stale;
-                return $stale;
+            foreach ($variants as $variant) {
+                $stale = $this->readServicesCache($variant, false);
+                if (is_array($stale)) {
+                    $this->servicesMemoryCache[$variant] = $stale;
+                    $this->servicesMemoryCache[$action] = $stale;
+                    return $stale;
+                }
             }
         }
 
-        return $result;
+        return $lastResult;
     }
 
     public function serviceById(int $serviceId, string $action = 'services'): ?array
@@ -182,6 +202,201 @@ final class ProviderClient
             'action' => 'status_refill',
             'id' => $providerRefillId,
         ]);
+    }
+
+    private function sendRequest(array $payload, int $timeout, string $contentType): array
+    {
+        $headers = ['Accept: application/json'];
+        $postBody = http_build_query($payload);
+
+        if ($contentType === 'json') {
+            $headers[] = 'Content-Type: application/json';
+            $postBody = json_encode($payload, JSON_UNESCAPED_UNICODE);
+        } else {
+            $headers[] = 'Content-Type: application/x-www-form-urlencoded';
+        }
+
+        if (!is_string($postBody)) {
+            $postBody = '';
+        }
+
+        if (!function_exists('curl_init')) {
+            return $this->sendRequestViaStream($headers, $postBody, $timeout);
+        }
+
+        $ch = curl_init($this->apiUrl);
+        if ($ch === false) {
+            return [
+                'status' => false,
+                'data' => ['msg' => 'Gagal koneksi ke layanan: tidak dapat menginisialisasi cURL.'],
+            ];
+        }
+
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_CONNECTTIMEOUT => min(8, max(3, (int)floor($timeout / 2))),
+            CURLOPT_TIMEOUT => $timeout,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_POSTFIELDS => $postBody,
+        ]);
+
+        $result = curl_exec($ch);
+        $error = curl_error($ch);
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($result === false) {
+            return [
+                'status' => false,
+                'data' => ['msg' => 'Gagal koneksi ke layanan: ' . $error],
+            ];
+        }
+
+        $decoded = json_decode($result, true);
+        if (!is_array($decoded)) {
+            return [
+                'status' => false,
+                'data' => ['msg' => 'Respon layanan bukan JSON valid. HTTP ' . $status],
+            ];
+        }
+
+        return $decoded;
+    }
+
+    private function sendRequestViaStream(array $headers, string $postBody, int $timeout): array
+    {
+        $headerText = implode("\r\n", array_filter($headers, static fn ($line) => is_string($line) && trim($line) !== ''));
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => $headerText,
+                'content' => $postBody,
+                'timeout' => max(5, $timeout),
+                'ignore_errors' => true,
+            ],
+            'ssl' => [
+                'verify_peer' => true,
+                'verify_peer_name' => true,
+            ],
+        ]);
+
+        $result = @file_get_contents($this->apiUrl, false, $context);
+        $responseHeaders = isset($http_response_header) && is_array($http_response_header)
+            ? $http_response_header
+            : [];
+        $status = $this->extractStatusFromHeaders($responseHeaders);
+
+        if ($result === false) {
+            $err = error_get_last();
+            $msg = is_array($err) ? (string)($err['message'] ?? 'Unknown stream error.') : 'Unknown stream error.';
+            return [
+                'status' => false,
+                'data' => ['msg' => 'Gagal koneksi ke layanan: ' . $msg],
+            ];
+        }
+
+        $decoded = json_decode((string)$result, true);
+        if (!is_array($decoded)) {
+            return [
+                'status' => false,
+                'data' => ['msg' => 'Respon layanan bukan JSON valid. HTTP ' . $status],
+            ];
+        }
+
+        return $decoded;
+    }
+
+    private function extractStatusFromHeaders(array $headers): int
+    {
+        foreach ($headers as $line) {
+            if (!is_string($line)) {
+                continue;
+            }
+
+            if (preg_match('/^HTTP\/\d+(?:\.\d+)?\s+(\d{3})/i', trim($line), $matches) === 1) {
+                return (int)$matches[1];
+            }
+        }
+
+        return 0;
+    }
+
+    private function serviceActionFallbackChain(string $action): array
+    {
+        $normalized = mb_strtolower(trim($action));
+        $map = [
+            'services' => ['services3', 'services_1', 'services2', 'services'],
+            'services_1' => ['services_1', 'services3', 'services', 'services2'],
+            'services2' => ['services2', 'services3', 'services_1', 'services'],
+            'services3' => ['services3', 'services_1', 'services2', 'services'],
+        ];
+
+        $variants = $map[$normalized] ?? ['services3', 'services_1', 'services2', 'services'];
+        $seen = [];
+        $ordered = [];
+        foreach ($variants as $variant) {
+            if (isset($seen[$variant])) {
+                continue;
+            }
+            $seen[$variant] = true;
+            $ordered[] = $variant;
+        }
+
+        return $ordered;
+    }
+
+    private function isRequestFormatError(string $message): bool
+    {
+        if ($message === '') {
+            return false;
+        }
+
+        $needles = [
+            'permintaan tidak sesuai',
+            'content-type',
+            'json',
+            'invalid',
+            'malformed',
+            'format',
+        ];
+        foreach ($needles as $needle) {
+            if (str_contains($message, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isRetryableRequestFailure(string $message): bool
+    {
+        if ($message === '') {
+            return true;
+        }
+
+        if ($this->isRequestFormatError($message)) {
+            return true;
+        }
+
+        $retryableNeedles = [
+            'gagal koneksi',
+            'timeout',
+            'timed out',
+            'http 5',
+            'service unavailable',
+            'internal server error',
+            'bad gateway',
+            'gateway timeout',
+        ];
+        foreach ($retryableNeedles as $needle) {
+            if (str_contains($message, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function getServicesCacheFile(string $action): string

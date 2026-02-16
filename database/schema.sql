@@ -50,7 +50,11 @@ CREATE TABLE IF NOT EXISTS orders (
     updated_at DATETIME NOT NULL,
     CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     INDEX idx_orders_user_created (user_id, created_at),
-    INDEX idx_orders_provider (provider_order_id)
+    INDEX idx_orders_provider (provider_order_id),
+    INDEX idx_orders_status_created (status, created_at),
+    INDEX idx_orders_status_service_created (status, service_id, created_at),
+    INDEX idx_orders_status_deadline_confirm (status, payment_deadline_at, payment_confirmed_at),
+    INDEX idx_orders_user_status_created (user_id, status, created_at)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS order_refills (
@@ -110,7 +114,7 @@ CREATE TABLE IF NOT EXISTS news_posts (
     title VARCHAR(180) NOT NULL,
     summary TEXT NOT NULL,
     content LONGTEXT NOT NULL,
-    source_name VARCHAR(120) NOT NULL DEFAULT 'BuzzerPanel',
+    source_name VARCHAR(120) NOT NULL DEFAULT 'Odyssiavault',
     source_url VARCHAR(500) NULL,
     is_published TINYINT(1) NOT NULL DEFAULT 1,
     published_at DATETIME NOT NULL,
@@ -120,4 +124,36 @@ CREATE TABLE IF NOT EXISTS news_posts (
     CONSTRAINT fk_news_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
     INDEX idx_news_published (is_published, published_at),
     INDEX idx_news_created (created_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS tickets (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NOT NULL,
+    order_id BIGINT UNSIGNED NULL,
+    subject VARCHAR(180) NOT NULL,
+    category VARCHAR(80) NOT NULL DEFAULT 'Laporan',
+    priority ENUM('low', 'normal', 'high', 'urgent') NOT NULL DEFAULT 'normal',
+    status ENUM('open', 'answered', 'closed') NOT NULL DEFAULT 'open',
+    last_message_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT fk_tickets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_tickets_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL,
+    INDEX idx_tickets_user_created (user_id, created_at),
+    INDEX idx_tickets_status_updated (status, updated_at),
+    INDEX idx_tickets_last_message (last_message_at),
+    INDEX idx_tickets_user_status_updated (user_id, status, updated_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS ticket_messages (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    ticket_id BIGINT UNSIGNED NOT NULL,
+    user_id INT UNSIGNED NOT NULL,
+    sender_role ENUM('user', 'admin') NOT NULL DEFAULT 'user',
+    message TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    CONSTRAINT fk_ticket_messages_ticket FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE,
+    CONSTRAINT fk_ticket_messages_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_ticket_messages_ticket_created (ticket_id, created_at),
+    INDEX idx_ticket_messages_user_created (user_id, created_at)
 ) ENGINE=InnoDB;

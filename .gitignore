@@ -7,3 +7,8 @@ storage/cache/
 *.rar
 
 .vercel
+
+# Local scratch/testing files
+.codex_tmp*
+._tmp*
+scripts_simulate_*.js

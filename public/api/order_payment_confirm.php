@@ -8,6 +8,14 @@ $user = requireAuth($pdo);
 expireUnpaidOrders($pdo);
 
 $input = getRequestInput();
+$retryAfter = null;
+if (!rateLimitAllow('order_payment_confirm', 20, 60, $retryAfter)) {
+    jsonResponse([
+        'status' => false,
+        'data' => ['msg' => 'Permintaan konfirmasi terlalu cepat. Coba lagi sebentar.'],
+    ], 429);
+}
+
 $orderId = sanitizeQuantity($input['order_id'] ?? '');
 $methodCode = mb_strtolower(trim((string)($input['method_code'] ?? '')));
 $payerName = trim((string)($input['payer_name'] ?? ''));
@@ -37,7 +45,7 @@ if ($selectedMethod === null) {
     ], 422);
 }
 
-$orderStmt = $pdo->prepare('SELECT id, user_id, status, payment_deadline_at FROM orders WHERE id = :id AND user_id = :user_id LIMIT 1');
+$orderStmt = $pdo->prepare('SELECT id, user_id, status, payment_deadline_at, payment_confirmed_at, service_name, target, quantity, total_sell_price FROM orders WHERE id = :id AND user_id = :user_id LIMIT 1');
 $orderStmt->execute([
     'id' => $orderId,
     'user_id' => (int)$user['id'],
@@ -90,6 +98,23 @@ $updateStmt->execute([
     'id' => $orderId,
     'user_id' => (int)$user['id'],
 ]);
+
+$alreadyConfirmedBefore = trim((string)($order['payment_confirmed_at'] ?? '')) !== '';
+if (!$alreadyConfirmedBefore) {
+    notifyAdminPendingPaymentChannels($config, [
+        'order_id' => $orderId,
+        'username' => (string)($user['username'] ?? ''),
+        'service_name' => (string)($order['service_name'] ?? ''),
+        'target' => (string)($order['target'] ?? ''),
+        'quantity' => (int)($order['quantity'] ?? 0),
+        'total_sell_price' => (int)($order['total_sell_price'] ?? 0),
+        'payment_method_name' => (string)($selectedMethod['name'] ?? ''),
+        'payment_state' => 'Sudah konfirmasi buyer',
+        'payer_name' => $payerName,
+        'payment_reference' => $paymentReference,
+        'confirmed_at' => $now,
+    ]);
+}
 
 jsonResponse([
     'status' => true,

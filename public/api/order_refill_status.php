@@ -34,20 +34,20 @@ $providerRefillId = trim((string)($refill['provider_refill_id'] ?? ''));
 if ($providerRefillId === '') {
     jsonResponse([
         'status' => false,
-        'data' => ['msg' => 'Refill belum memiliki ID provider.'],
+        'data' => ['msg' => 'Refill belum memiliki ID server.'],
     ], 422);
 }
 
 if (!$client->isConfigured()) {
     jsonResponse([
         'status' => false,
-        'data' => ['msg' => 'Konfigurasi provider belum diisi (config/env).'],
+        'data' => ['msg' => 'Konfigurasi server layanan belum diisi (config/env).'],
     ], 500);
 }
 
 $statusResult = $client->refillStatus($providerRefillId);
 if (!($statusResult['status'] ?? false)) {
-    $providerMsg = (string)($statusResult['data']['msg'] ?? 'Gagal cek status refill ke provider.');
+    $providerMsg = (string)($statusResult['data']['msg'] ?? 'Gagal cek status refill ke server layanan.');
     jsonResponse([
         'status' => false,
         'data' => ['msg' => $providerMsg],

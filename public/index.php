@@ -7,6 +7,7 @@ $config = Config::load();
 $appConfig = (array)($config['app'] ?? []);
 $appName = htmlspecialchars((string)($appConfig['name'] ?? 'Odyssiavault'), ENT_QUOTES, 'UTF-8');
 $logoPath = htmlspecialchars((string)($appConfig['logo_path'] ?? 'assets/logo.png'), ENT_QUOTES, 'UTF-8');
+$shareUrl = htmlspecialchars(trim((string)($appConfig['base_url'] ?? '')), ENT_QUOTES, 'UTF-8');
 $paymentConfig = (array)($config['payment'] ?? []);
 $qrisPath = htmlspecialchars((string)($paymentConfig['qris_image'] ?? 'assets/qris.png'), ENT_QUOTES, 'UTF-8');
 $paymentMethods = checkoutPaymentMethods($config);
@@ -16,17 +17,19 @@ $requestedView = mb_strtolower(trim((string)($_GET['page'] ?? 'dashboard')));
 $initialView = in_array($requestedView, $allowedViews, true) ? $requestedView : 'dashboard';
 $cssVersion = (string)(@filemtime(__DIR__ . '/assets/app.css') ?: time());
 $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
+$indexVersion = (string)(@filemtime(__FILE__) ?: time());
+$buildTag = htmlspecialchars(substr(sha1($cssVersion . '-' . $jsVersion . '-' . $indexVersion), 0, 12), ENT_QUOTES, 'UTF-8');
 ?>
 <!doctype html>
 <html lang="id">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title><?= $appName ?> - Panel Topup</title>
   <link rel="stylesheet" href="./assets/app.css?v=<?= htmlspecialchars($cssVersion, ENT_QUOTES, 'UTF-8') ?>">
 </head>
 <body>
-  <div class="page" data-app-name="<?= $appName ?>" data-logo-path="<?= $logoPath ?>" data-payment-methods="<?= $paymentMethodsJson ?>" data-qris-path="<?= $qrisPath ?>" data-initial-view="<?= htmlspecialchars($initialView, ENT_QUOTES, 'UTF-8') ?>">
+  <div class="page" data-app-name="<?= $appName ?>" data-share-url="<?= $shareUrl ?>" data-logo-path="<?= $logoPath ?>" data-payment-methods="<?= $paymentMethodsJson ?>" data-qris-path="<?= $qrisPath ?>" data-initial-view="<?= htmlspecialchars($initialView, ENT_QUOTES, 'UTF-8') ?>" data-build="<?= $buildTag ?>">
     <section id="authView" class="auth-shell hidden">
       <div class="auth-card">
         <span class="badge">Odyssiavault - SMM & Kebsos Marketplace</span>
@@ -89,37 +92,79 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
         </div>
         <nav class="menu">
           <a href="./?page=dashboard" data-view="dashboard" class="<?= $initialView === 'dashboard' ? 'active' : '' ?>">Dashboard</a>
-          <a href="./?page=profile" data-view="profile" class="<?= $initialView === 'profile' ? 'active' : '' ?>">Profil</a>
           <a href="./?page=top5" data-view="top5" class="<?= $initialView === 'top5' ? 'active' : '' ?>">Top 5</a>
           <a href="./?page=purchase" data-view="purchase" class="<?= $initialView === 'purchase' ? 'active' : '' ?>">Pembelian</a>
           <a href="./?page=refill" data-view="refill" class="<?= $initialView === 'refill' ? 'active' : '' ?>">Refill</a>
-          <a href="./?page=deposit" data-view="deposit" class="<?= $initialView === 'deposit' ? 'active' : '' ?>">Pembayaran</a>
+          <a href="./?page=deposit" data-view="deposit" class="<?= $initialView === 'deposit' ? 'active' : '' ?>">Deposit</a>
           <a href="./?page=ticket" data-view="ticket" class="<?= $initialView === 'ticket' ? 'active' : '' ?>">Tiket</a>
           <a id="adminMenuLink" href="./?page=admin" data-view="admin" class="<?= $initialView === 'admin' ? 'active' : '' ?> hidden">Admin Panel</a>
           <a href="./?page=services" data-view="services" class="<?= $initialView === 'services' ? 'active' : '' ?>">Daftar Layanan</a>
           <a href="./?page=pages" data-view="pages" class="<?= $initialView === 'pages' ? 'active' : '' ?>">Halaman</a>
         </nav>
-        <p class="tip">Simpan logo kamu sebagai <strong>public/assets/logo.png</strong>.</p>
       </aside>
 
       <main class="main">
-        <header id="dashboardSection" class="topbar">
+        <header id="dashboardSection" class="topbar" data-view-section="dashboard,profile,top5,purchase,refill,deposit,ticket,services,pages,admin">
           <div>
             <h2>Dashboard Odyssiavault</h2>
             <p id="welcomeText">Memuat akun buyer...</p>
           </div>
           <div class="actions">
             <button id="btnRefresh" class="ghost" type="button">Refresh Data</button>
-            <button id="btnLogout" class="ghost" type="button">Logout</button>
+            <div id="accountMenu" class="account-menu">
+              <button id="accountMenuToggle" class="ghost account-trigger" type="button" aria-expanded="false">
+                <span id="accountAvatar" class="account-avatar">OV</span>
+                <span class="account-text">
+                  <strong id="accountMenuName">@buyer</strong>
+                  <small id="accountMenuRole">user</small>
+                </span>
+                <span class="account-caret" aria-hidden="true">v</span>
+              </button>
+              <div id="accountMenuPanel" class="account-panel hidden">
+                <button id="btnOpenProfile" class="account-item" type="button">Profil</button>
+                <button id="btnOpenSettings" class="account-item" type="button">Pengaturan</button>
+                <button id="btnLogout" class="account-item danger" type="button">Logout</button>
+              </div>
+            </div>
           </div>
         </header>
-
+        <section id="panelInfoSection" class="panel-info-bar" data-view-section="dashboard,profile,top5,purchase,refill,deposit,ticket,services,pages,admin">
+          <div class="panel-info-label">Info Panel</div>
+          <div class="panel-info-track">
+            <div id="panelInfoTickerText" class="panel-info-ticker">Memuat informasi panel...</div>
+          </div>
+          <div class="panel-info-actions">
+            <button id="panelInfoRefreshBtn" type="button" class="ghost mini-btn">Refresh Info</button>
+            <button id="panelInfoCloseBtn" type="button" class="ghost mini-btn">Tutup</button>
+          </div>
+        </section>
         <section class="stats" data-view-section="dashboard">
           <article><small>Menunggu Konfirmasi Admin</small><strong id="statBalance">0</strong></article>
           <article><small>Sedang Diproses</small><strong id="statOrders">0</strong></article>
           <article><small>Order Selesai</small><strong id="statSpent">0</strong></article>
         </section>
+        <section id="dashboardQuickSection" class="card" data-view-section="dashboard">
+          <div class="headline-row">
+            <h3 style="margin:0;">Akses Cepat</h3>
+            <span class="muted">Navigasi ringkas untuk buyer</span>
+          </div>
+          <div class="quick-actions">
+            <button type="button" class="quick-action-btn" data-quick-view="purchase">Buat Pesanan</button>
+            <button type="button" class="quick-action-btn" data-quick-view="top5">Top 5</button>
+            <button type="button" class="quick-action-btn" data-quick-view="services">Daftar Layanan</button>
+            <button type="button" class="quick-action-btn" data-quick-view="ticket">Buat Tiket</button>
+          </div>
+        </section>
 
+        <section id="dashboardUpdateSection" class="card" data-view-section="dashboard">
+          <div class="headline-row">
+            <h3 style="margin:0;">Update Layanan Terbaru</h3>
+            <span id="servicesSyncMeta" class="muted">Sinkronisasi data layanan...</span>
+          </div>
+          <div id="dashboardHighlights" class="dashboard-highlight-grid">
+            <div class="box">Memuat update layanan terbaru...</div>
+          </div>
+        </section>
         <section id="profileSection" class="card" data-view-section="profile">
           <h3>Profil Akun</h3>
           <div class="profile-grid">
@@ -166,15 +211,40 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
               <strong id="profileCompletedOrders">0</strong>
             </div>
           </div>
+
+          <div class="profile-settings">
+            <h4>Pengaturan Akun</h4>
+            <form id="profilePasswordForm" class="form-grid" autocomplete="off">
+              <div class="two">
+                <div>
+                  <label>Password Saat Ini</label>
+                  <input id="currentPassword" type="password" placeholder="Masukkan password saat ini" required>
+                </div>
+                <div>
+                  <label>Password Baru</label>
+                  <input id="newPassword" type="password" placeholder="Minimal 6 karakter" required>
+                </div>
+              </div>
+              <div>
+                <label>Konfirmasi Password Baru</label>
+                <input id="confirmPassword" type="password" placeholder="Ulangi password baru" required>
+              </div>
+              <div class="headline-row">
+                <span class="muted">Gunakan password unik agar akun lebih aman.</span>
+                <button type="submit" class="mini-btn">Simpan Pengaturan</button>
+              </div>
+              <div id="profilePasswordNotice" class="notice info hidden"></div>
+            </form>
+          </div>
         </section>
 
         <section id="newsSection" class="card" data-view-section="dashboard">
           <div class="headline-row">
             <h3 style="margin:0;">Berita & Pengumuman</h3>
-            <span class="muted">Sumber update: Odyssiavault</span>
+            <span class="muted">Sumber update: Sinkronisasi layanan otomatis</span>
           </div>
           <p class="muted" style="margin:0 0 10px;">
-            Dashboard ini difokuskan sebagai pusat informasi terbaru untuk buyer Odyssiavault.
+            Update ditarik otomatis dari layanan aktif agar buyer selalu melihat informasi terbaru.
           </p>
           <div id="newsList" class="news-list">
             <div class="box">Memuat berita terbaru...</div>
@@ -265,13 +335,19 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
               <div class="two">
                 <div>
                   <label>Kategori (Cari / Pilih)</label>
-                  <input id="categoryInput" list="categoryOptions" placeholder="Ketik nama kategori atau ID..." autocomplete="off">
-                  <datalist id="categoryOptions"></datalist>
+                  <div class="suggestion-field">
+                    <input id="categoryInput" placeholder="Ketik nama kategori atau ID..." autocomplete="off">
+                    <div id="categorySuggestPanel" class="suggest-panel hidden" role="listbox" aria-label="Saran kategori"></div>
+                    <datalist id="categoryOptions"></datalist>
+                  </div>
                 </div>
                 <div>
                   <label>Layanan (Cari / Pilih)</label>
-                  <input id="serviceInput" list="serviceOptions" placeholder="Ketik nama layanan atau ID..." autocomplete="off" required>
-                  <datalist id="serviceOptions"></datalist>
+                  <div class="suggestion-field">
+                    <input id="serviceInput" placeholder="Ketik nama layanan atau ID..." autocomplete="off" required>
+                    <div id="serviceSuggestPanel" class="suggest-panel hidden" role="listbox" aria-label="Saran layanan"></div>
+                    <datalist id="serviceOptions"></datalist>
+                  </div>
                 </div>
               </div>
               <div class="three">
@@ -294,7 +370,7 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
                 <div class="two">
                   <div>
                     <label>comments</label>
-                    <textarea id="comments" placeholder="Alternatif field komentar provider"></textarea>
+                    <textarea id="comments" placeholder="Alternatif field komentar tambahan"></textarea>
                   </div>
                   <div>
                     <label>username</label>
@@ -318,31 +394,7 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
               <div id="checkoutPanel" class="box hidden">
                 <strong>Checkout Berhasil - Menunggu Konfirmasi Admin</strong>
                 <div id="checkoutSummary" class="muted" style="margin-top:8px;"></div>
-                <div id="checkoutMethods" class="contact-links" style="margin-top:10px;"></div>
-                <div id="paymentConfirmForm" class="form-grid" style="margin-top:10px;">
-                  <div class="two">
-                    <div>
-                      <label>Metode Pembayaran</label>
-                      <select id="paymentMethodSelect" required></select>
-                    </div>
-                    <div>
-                      <label>Ref. Transfer / No. Rekening Pengirim</label>
-                      <input id="paymentReference" placeholder="Contoh: 1234567890">
-                    </div>
-                  </div>
-                  <div class="two">
-                    <div>
-                      <label>Nama Pengirim</label>
-                      <input id="paymentPayerName" placeholder="Contoh: Farrel">
-                    </div>
-                    <div>
-                      <label>Catatan</label>
-                      <input id="paymentPayerNote" placeholder="Opsional">
-                    </div>
-                  </div>
-                  <button id="paymentConfirmBtn" type="button">Saya Sudah Bayar (Konfirmasi)</button>
-                  <div id="paymentConfirmNotice" class="notice info hidden"></div>
-                </div>
+                <select id="paymentMethodSelect" class="hidden" aria-hidden="true" tabindex="-1"></select>
               </div>
             </form>
 
@@ -409,10 +461,10 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
           <div class="box">
             <strong>Keterangan simbol layanan:</strong>
             <ul class="info-list" style="margin-top:8px;">
-              <li><strong>🔥</strong> Layanan favorit / performa tinggi.</li>
-              <li><strong>💧</strong> Mendukung dripfeed.</li>
-              <li><strong>♻️</strong> Mendukung refill.</li>
-              <li><strong>🛑</strong> Mendukung cancel pada kondisi tertentu.</li>
+              <li><strong>TOP</strong> Layanan favorit / performa tinggi.</li>
+              <li><strong>DRIP</strong> Mendukung dripfeed.</li>
+              <li><strong>REFILL</strong> Mendukung refill.</li>
+              <li><strong>CANCEL</strong> Mendukung cancel pada kondisi tertentu.</li>
               <li><strong>Rxx / ARxx</strong> Periode refill manual / otomatis.</li>
             </ul>
             <div class="muted" style="margin-top:8px;">
@@ -486,7 +538,7 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
         <section id="refillSection" class="card" data-view-section="refill">
           <h3>Refill</h3>
           <div class="box">
-            Refill digunakan untuk order yang sudah masuk provider namun butuh pengisian ulang.
+            Refill digunakan untuk order yang sudah masuk server layanan namun butuh pengisian ulang.
             Masukkan ID Order Lokal, lalu klik Ajukan Refill.
           </div>
           <form id="refillForm" class="form-grid" style="margin-top:10px;">
@@ -514,7 +566,7 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
                   <th>ID Refill</th>
                   <th>ID Order</th>
                   <th>Layanan</th>
-                  <th>Refill Provider</th>
+                  <th>Refill Server</th>
                   <th>Status</th>
                   <th>Dibuat</th>
                   <th>Aksi</th>
@@ -527,36 +579,187 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
         </section>
 
         <section id="depositSection" class="card" data-view-section="deposit">
-          <h3>Metode Pembayaran</h3>
-          <div class="contact-links">
-            <?php foreach ($paymentMethods as $method): ?>
-              <div class="contact-link">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5H5a2 2 0 0 0-2 2v13l4-3h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm-7 9H7v-2h5v2Zm5-4H7V8h10v2Z"></path></svg>
+          <h3>Deposit Saldo (QRIS)</h3>
+          <div class="box">
+            Fitur ini untuk buyer yang ingin isi saldo akun internal. Buat nominal deposit, transfer sesuai QRIS, lalu tunggu verifikasi admin.
+          </div>
+          <div class="order-layout" style="margin-top:10px;">
+            <form id="depositForm" class="form-grid">
+              <div class="two">
                 <div>
-                  <strong><?= htmlspecialchars((string)($method['name'] ?? '-'), ENT_QUOTES, 'UTF-8') ?></strong>
-                  <span><?= htmlspecialchars((string)($method['account_number'] ?? '-'), ENT_QUOTES, 'UTF-8') ?> a.n. <?= htmlspecialchars((string)($method['account_name'] ?? '-'), ENT_QUOTES, 'UTF-8') ?></span>
+                  <label>Nominal Deposit</label>
+                  <input id="depositAmount" inputmode="numeric" placeholder="Contoh: 50000" required>
+                </div>
+                <div>
+                  <label>Nama Pengirim (Opsional)</label>
+                  <input id="depositPayerName" placeholder="Contoh: Odyssia Buyer">
                 </div>
               </div>
-            <?php endforeach; ?>
+              <div>
+                <label>Catatan Deposit (Opsional)</label>
+                <textarea id="depositPayerNote" placeholder="Contoh: Transfer dari DANA / Bank ..."></textarea>
+              </div>
+              <button type="submit">Buat Permintaan Deposit</button>
+              <div id="depositNotice" class="notice info hidden"></div>
+            </form>
+
+            <aside class="order-side">
+              <div class="box">
+                <strong>QRIS Odyssiavault</strong>
+                <img id="qrisImage" class="qris-img" alt="QRIS Odyssiavault" style="margin-top:10px;">
+                <div id="qrisMeta" class="muted" style="margin-top:8px;">Penerima: Odyssiavault</div>
+              </div>
+              <div id="depositInstruction" class="box">
+                Scan QRIS, transfer sesuai nominal final, lalu tunggu verifikasi admin.
+              </div>
+            </aside>
           </div>
-          <div class="box">
-            Alur pembayaran tanpa deposit:
-            1. Pilih layanan dan checkout.
-            2. Sistem menampilkan total bayar + metode pembayaran.
-            3. Transfer sesuai nominal.
-            4. Klik tombol konfirmasi pembayaran pada panel checkout.
-            5. Admin verifikasi, lalu order diproses ke provider.
+
+          <h3 style="margin-top:14px;">Riwayat Deposit</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Nominal</th>
+                  <th>Nominal Transfer</th>
+                  <th>Status</th>
+                  <th>Waktu</th>
+                  <th>Catatan Admin</th>
+                </tr>
+              </thead>
+              <tbody id="depositHistoryBody"><tr><td colspan="6">Belum ada data deposit.</td></tr></tbody>
+            </table>
+          </div>
+
+          <div id="depositAdminPanel" class="hidden" style="margin-top:14px;">
+            <h3 style="margin:0 0 10px;">Verifikasi Deposit (Admin)</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>User</th>
+                    <th>Nominal Final</th>
+                    <th>Status</th>
+                    <th>Info Buyer</th>
+                    <th>Waktu</th>
+                    <th>Aksi</th>
+                  </tr>
+                </thead>
+                <tbody id="depositAdminBody"><tr><td colspan="7">Tidak ada deposit pending.</td></tr></tbody>
+              </table>
+            </div>
+            <div id="depositAdminNotice" class="notice info hidden"></div>
           </div>
         </section>
 
         <section id="ticketSection" class="card" data-view-section="ticket">
-          <h3>Tiket</h3>
-          <div class="box">Bantuan cepat: kirim detail kendala (ID order, layanan, target, kronologi) ke tim support Odyssiavault. Untuk pembayaran, buyer cukup konfirmasi dari panel checkout.</div>
+          <h3>Tiket Laporan</h3>
+          <div class="box">
+            Buat tiket jika ada kendala order, pembayaran, atau layanan. Sertakan ID order dan kronologi agar tim Odyssiavault bisa membantu lebih cepat.
+          </div>
+
+          <form id="ticketForm" class="form-grid" style="margin-top:10px;">
+            <div class="two">
+              <div>
+                <label>Subjek Tiket</label>
+                <input id="ticketSubject" placeholder="Contoh: Order belum diproses" maxlength="180" required>
+              </div>
+              <div>
+                <label>Kategori</label>
+                <select id="ticketCategory">
+                  <option value="Laporan Order">Laporan Order</option>
+                  <option value="Pembayaran">Pembayaran</option>
+                  <option value="Layanan">Layanan</option>
+                  <option value="Lainnya">Lainnya</option>
+                </select>
+              </div>
+            </div>
+            <div class="two">
+              <div>
+                <label>ID Order (Opsional)</label>
+                <input id="ticketOrderId" placeholder="Contoh: 12345">
+              </div>
+              <div>
+                <label>Prioritas</label>
+                <select id="ticketPriority">
+                  <option value="normal">Normal</option>
+                  <option value="high">High</option>
+                  <option value="urgent">Urgent</option>
+                  <option value="low">Low</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label>Pesan Laporan</label>
+              <textarea id="ticketMessage" placeholder="Jelaskan masalah secara singkat dan jelas..." required></textarea>
+            </div>
+            <button type="submit">Buat Tiket</button>
+            <div id="ticketNotice" class="notice info hidden"></div>
+          </form>
+
+          <div class="headline-row" style="margin-top:14px;">
+            <h3 style="margin:0;">Daftar Tiket</h3>
+            <button id="ticketRefreshBtn" type="button" class="ghost mini-btn">Refresh Tiket</button>
+          </div>
+
+          <div class="two" style="margin-bottom:10px;">
+            <div>
+              <label>Filter Status</label>
+              <select id="ticketStatusFilter">
+                <option value="all">Semua</option>
+                <option value="open">Open</option>
+                <option value="answered">Answered</option>
+                <option value="closed">Closed</option>
+              </select>
+            </div>
+            <div>
+              <label>Cari Tiket</label>
+              <input id="ticketSearchInput" placeholder="Cari ID tiket / subjek / username">
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Subjek</th>
+                  <th>Order</th>
+                  <th>Status</th>
+                  <th>Prioritas</th>
+                  <th>Update</th>
+                  <th>Aksi</th>
+                </tr>
+              </thead>
+              <tbody id="ticketBody"><tr><td colspan="7">Belum ada tiket.</td></tr></tbody>
+            </table>
+          </div>
+
+          <div id="ticketDetailPanel" class="ticket-detail hidden">
+            <div class="headline-row">
+              <h3 id="ticketDetailTitle" style="margin:0;">Detail Tiket</h3>
+              <button id="ticketCloseDetailBtn" type="button" class="ghost mini-btn">Tutup Detail</button>
+            </div>
+            <div id="ticketDetailMeta" class="muted" style="margin-bottom:10px;">Pilih tiket untuk melihat percakapan.</div>
+            <div id="ticketMessages" class="ticket-messages"></div>
+            <div class="ticket-reply-box">
+              <label>Balas Tiket</label>
+              <textarea id="ticketReplyMessage" placeholder="Tulis balasan..."></textarea>
+              <div class="ticket-reply-actions">
+                <button id="ticketReplyBtn" type="button" class="mini-btn">Kirim Balasan</button>
+                <button id="ticketCloseBtn" type="button" class="mini-btn danger hidden">Tutup Tiket</button>
+                <button id="ticketReopenBtn" type="button" class="mini-btn success hidden">Buka Kembali</button>
+              </div>
+            </div>
+            <div id="ticketDetailNotice" class="notice info hidden"></div>
+          </div>
         </section>
 
         <section id="adminSection" class="card hidden" data-view-section="admin">
           <h3>Panel Admin - ACC Pembayaran</h3>
-          <p class="muted" style="margin:0 0 10px;">Halaman khusus admin untuk verifikasi pembayaran buyer agar proses order ke provider lebih cepat.</p>
+          <p class="muted" style="margin:0 0 10px;">Halaman khusus admin untuk verifikasi pembayaran buyer agar proses order ke server layanan lebih cepat.</p>
           <div id="adminPaymentSection" class="hidden">
             <div class="table-wrap">
               <table>
@@ -576,6 +779,63 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
               </table>
             </div>
             <div id="adminPaymentNotice" class="notice info hidden"></div>
+          </div>
+
+          <div id="adminOrderHistorySection" class="hidden" style="margin-top:14px;">
+            <div class="headline-row" style="margin-bottom:10px;">
+              <h3 style="margin:0;">Riwayat Pembelian (Semua Status)</h3>
+              <button id="adminOrderHistoryRefreshBtn" type="button" class="ghost mini-btn">Refresh Riwayat</button>
+            </div>
+
+            <div class="three" style="margin-bottom:10px;">
+              <div>
+                <label>Cari Riwayat</label>
+                <input id="adminOrderHistorySearch" placeholder="Cari ID order, username, layanan, target...">
+              </div>
+              <div>
+                <label>Filter Status</label>
+                <select id="adminOrderHistoryStatus">
+                  <option value="all">Semua Status</option>
+                  <option value="waiting">Menunggu Pembayaran</option>
+                  <option value="processing">Diproses</option>
+                  <option value="success">Selesai</option>
+                  <option value="failed">Dibatalkan / Gagal</option>
+                </select>
+              </div>
+              <div>
+                <label>Tampil per Halaman</label>
+                <select id="adminOrderHistoryPerPage">
+                  <option value="25" selected>25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="adminOrderHistorySummary" class="box" style="margin:0 0 10px;min-height:42px;display:flex;align-items:center;">Memuat riwayat pembelian...</div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>User</th>
+                    <th>Layanan</th>
+                    <th>Target</th>
+                    <th>Jumlah</th>
+                    <th>Total</th>
+                    <th>Status</th>
+                    <th>Pembayaran</th>
+                    <th>Order Server</th>
+                    <th>Waktu</th>
+                    <th>Catatan</th>
+                  </tr>
+                </thead>
+                <tbody id="adminOrderHistoryBody"><tr><td colspan="11">Belum ada data riwayat pembelian.</td></tr></tbody>
+              </table>
+            </div>
+            <div id="adminOrderHistoryPagination" class="pagination"></div>
+            <div id="adminOrderHistoryNotice" class="notice info hidden"></div>
           </div>
         </section>
 
@@ -655,6 +915,51 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
               <div><strong>Grup WhatsApp</strong><span>App Premium Lengkap</span></div>
             </a>
           </div>
+          <div class="box">
+            <strong>Pertanyaan Umum (FAQ)</strong>
+            <ul class="info-list" style="margin-top:8px;">
+              <li>Order baru diproses setelah pembayaran diverifikasi admin.</li>
+              <li>Gunakan target valid (link/username sesuai ketentuan layanan).</li>
+              <li>Jangan kirim order ganda pada target sama sebelum order sebelumnya selesai.</li>
+              <li>Jika order lambat lebih dari 1x24 jam, buat tiket laporan.</li>
+            </ul>
+          </div>
+          <div class="box">
+            <strong>Ketentuan Layanan</strong>
+            <ul class="info-list" style="margin-top:8px;">
+              <li>Order yang sudah disubmit tidak bisa dibatalkan, kecuali gagal dari server layanan.</li>
+              <li>Kesalahan input target oleh buyer bukan tanggung jawab admin.</li>
+              <li>Estimasi kecepatan layanan dapat berubah sesuai kondisi server.</li>
+              <li>Dengan melakukan order, buyer dianggap menyetujui semua ketentuan Odyssiavault.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section id="shareSection" class="card" data-view-section="pages">
+          <div class="headline-row">
+            <h3 style="margin:0;">Bagikan Website Odyssiavault</h3>
+            <span class="muted">Share langsung ke aplikasi sosial media</span>
+          </div>
+          <div class="share-toolbar">
+            <button id="shareNativeBtn" type="button" class="mini-btn">Bagikan Sekarang</button>
+            <button id="shareCopyBtn" type="button" class="ghost mini-btn">Copy Link</button>
+          </div>
+          <div class="share-link-box">
+            <label for="shareWebsiteUrl">Link Website</label>
+            <input id="shareWebsiteUrl" type="text" readonly value="">
+          </div>
+          <div class="share-actions-grid">
+            <button type="button" class="ghost share-btn" data-share-provider="whatsapp">WhatsApp</button>
+            <button type="button" class="ghost share-btn" data-share-provider="telegram">Telegram</button>
+            <button type="button" class="ghost share-btn" data-share-provider="discord">Discord</button>
+            <button type="button" class="ghost share-btn" data-share-provider="instagram">Instagram</button>
+            <button type="button" class="ghost share-btn" data-share-provider="facebook">Facebook</button>
+            <button type="button" class="ghost share-btn" data-share-provider="x">X / Twitter</button>
+            <button type="button" class="ghost share-btn" data-share-provider="linkedin">LinkedIn</button>
+            <button type="button" class="ghost share-btn" data-share-provider="line">Line</button>
+            <button type="button" class="ghost share-btn" data-share-provider="email">Email</button>
+          </div>
+          <div id="shareNotice" class="notice info hidden"></div>
         </section>
 
         <footer class="site-footer" data-view-section="pages">
@@ -695,7 +1000,9 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
       <div id="paymentQrInstruction" class="box" style="margin-top:10px;">
         Scan QR, bayar sesuai nominal, lalu tunggu verifikasi admin.
       </div>
+      <div id="paymentQrNotice" class="notice info hidden" style="margin-top:10px;"></div>
       <div style="margin-top:10px;display:flex;justify-content:flex-end;gap:8px;">
+        <button id="paymentQrConfirmBtn" type="button" class="mini-btn success">Saya Sudah Bayar</button>
         <button id="paymentQrToHistory" type="button" class="mini-btn">Buka Riwayat</button>
       </div>
     </div>
@@ -703,4 +1010,9 @@ $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
   <script src="./assets/app.js?v=<?= htmlspecialchars($jsVersion, ENT_QUOTES, 'UTF-8') ?>"></script>
 </body>
 </html>
+
+
+
+
+
 

@@ -16,25 +16,7 @@ $sql = '
         COUNT(*) AS total_orders,
         MAX(created_at) AS last_order_at
     FROM orders
-    WHERE
-        (
-            LOWER(COALESCE(status, \'\')) LIKE \'%selesai%\'
-            OR LOWER(COALESCE(provider_status, \'\')) LIKE \'%selesai%\'
-            OR LOWER(COALESCE(status, \'\')) LIKE \'%success%\'
-            OR LOWER(COALESCE(status, \'\')) LIKE \'%complete%\'
-            OR LOWER(COALESCE(status, \'\')) LIKE \'%done%\'
-            OR LOWER(COALESCE(provider_status, \'\')) LIKE \'%success%\'
-            OR LOWER(COALESCE(provider_status, \'\')) LIKE \'%complete%\'
-            OR LOWER(COALESCE(provider_status, \'\')) LIKE \'%done%\'
-        )
-        AND LOWER(COALESCE(status, \'\')) NOT LIKE \'%fail%\'
-        AND LOWER(COALESCE(status, \'\')) NOT LIKE \'%error%\'
-        AND LOWER(COALESCE(status, \'\')) NOT LIKE \'%cancel%\'
-        AND LOWER(COALESCE(status, \'\')) NOT LIKE \'%partial%\'
-        AND LOWER(COALESCE(provider_status, \'\')) NOT LIKE \'%fail%\'
-        AND LOWER(COALESCE(provider_status, \'\')) NOT LIKE \'%error%\'
-        AND LOWER(COALESCE(provider_status, \'\')) NOT LIKE \'%cancel%\'
-        AND LOWER(COALESCE(provider_status, \'\')) NOT LIKE \'%partial%\'
+    WHERE status IN (\'Selesai\', \'Completed\', \'Success\')
     GROUP BY service_id, service_name, category
     ORDER BY total_orders DESC, last_order_at DESC, service_name ASC
     LIMIT :limit

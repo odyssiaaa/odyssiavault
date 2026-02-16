@@ -10,7 +10,7 @@ requireAdmin($user);
 if (!$client->isConfigured()) {
     jsonResponse([
         'status' => false,
-        'data' => ['msg' => 'Konfigurasi provider belum diisi (config/env).'],
+        'data' => ['msg' => 'Konfigurasi server layanan belum diisi (config/env).'],
     ], 500);
 }
 
