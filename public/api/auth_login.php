@@ -5,7 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/bootstrap.php';
 
 $input = getRequestInput();
-$identity = trim((string)($input['identity'] ?? ''));
+$identity = trim((string)($input['identity'] ?? $input['username'] ?? $input['email'] ?? ''));
 $password = (string)($input['password'] ?? '');
 
 if ($identity === '' || $password === '') {
