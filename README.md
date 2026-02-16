@@ -158,11 +158,12 @@ Masuk ke:
 
 Minimal isi:
 - `APP_BASE_URL` = `https://nama-project-kamu.vercel.app`
-- `DB_HOST`
-- `DB_PORT` (contoh `3306`)
-- `DB_DATABASE`
-- `DB_USERNAME`
-- `DB_PASSWORD`
+- salah satu:
+  - `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`
+  - atau `DATABASE_URL` (format: `mysql://user:pass@host:port/dbname?ssl-mode=REQUIRED`)
+- untuk Aiven/DB SSL:
+  - `DB_SSL_MODE` = `REQUIRED`
+  - opsional `DB_SSL_CA` (path) atau `DB_SSL_CA_BASE64` (isi cert CA dalam base64)
 - `PROVIDER_API_URL` = `https://buzzerpanel.id/api/json.php`
 - `PROVIDER_API_KEY`
 - `PROVIDER_SECRET_KEY`

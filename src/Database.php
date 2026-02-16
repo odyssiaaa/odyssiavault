@@ -5,6 +5,7 @@ declare(strict_types=1);
 final class Database
 {
     private static bool $schemaEnsured = false;
+    private static array $tempSslFiles = [];
 
     public static function connect(array $config): PDO
     {
@@ -20,12 +21,18 @@ final class Database
         }
 
         $dsn = sprintf('mysql:host=%s;port=%d;dbname=%s;charset=%s', $host, $port, $dbName, $charset);
-
-        return new PDO($dsn, $username, $password, [
+        $pdoOptions = [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             PDO::ATTR_EMULATE_PREPARES => false,
-        ]);
+        ];
+
+        $sslMode = strtoupper(trim((string)($config['ssl_mode'] ?? 'DISABLED')));
+        if ($sslMode !== '' && $sslMode !== 'DISABLED') {
+            self::applySslOptions($pdoOptions, $config);
+        }
+
+        return new PDO($dsn, $username, $password, $pdoOptions);
     }
 
     public static function ensureSchema(PDO $pdo): void
@@ -111,5 +118,79 @@ final class Database
             $definition
         );
         $pdo->exec($sql);
+    }
+
+    private static function applySslOptions(array &$pdoOptions, array $config): void
+    {
+        if (defined('PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT')) {
+            $pdoOptions[PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT] = (bool)($config['ssl_verify_server_cert'] ?? false);
+        }
+
+        $sslCaPath = self::resolveSslFilePath(
+            (string)($config['ssl_ca'] ?? ''),
+            (string)($config['ssl_ca_base64'] ?? ''),
+            'ca'
+        );
+        if ($sslCaPath !== '' && defined('PDO::MYSQL_ATTR_SSL_CA')) {
+            $pdoOptions[PDO::MYSQL_ATTR_SSL_CA] = $sslCaPath;
+        }
+
+        $sslCertPath = self::resolveSslFilePath(
+            (string)($config['ssl_cert'] ?? ''),
+            (string)($config['ssl_cert_base64'] ?? ''),
+            'cert'
+        );
+        if ($sslCertPath !== '' && defined('PDO::MYSQL_ATTR_SSL_CERT')) {
+            $pdoOptions[PDO::MYSQL_ATTR_SSL_CERT] = $sslCertPath;
+        }
+
+        $sslKeyPath = self::resolveSslFilePath(
+            (string)($config['ssl_key'] ?? ''),
+            (string)($config['ssl_key_base64'] ?? ''),
+            'key'
+        );
+        if ($sslKeyPath !== '' && defined('PDO::MYSQL_ATTR_SSL_KEY')) {
+            $pdoOptions[PDO::MYSQL_ATTR_SSL_KEY] = $sslKeyPath;
+        }
+    }
+
+    private static function resolveSslFilePath(string $pathValue, string $base64Value, string $type): string
+    {
+        $pathValue = trim($pathValue);
+        if ($pathValue !== '' && is_file($pathValue)) {
+            return $pathValue;
+        }
+
+        $base64Value = trim($base64Value);
+        if ($base64Value === '') {
+            return '';
+        }
+
+        $decoded = base64_decode($base64Value, true);
+        if ($decoded === false || trim($decoded) === '') {
+            return '';
+        }
+
+        $hash = sha1($decoded);
+        if (isset(self::$tempSslFiles[$hash]) && is_file(self::$tempSslFiles[$hash])) {
+            return self::$tempSslFiles[$hash];
+        }
+
+        $tmpDir = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'odyssiavault-db-ssl';
+        if (!is_dir($tmpDir)) {
+            @mkdir($tmpDir, 0775, true);
+        }
+
+        $safeType = preg_replace('/[^a-z0-9_-]/i', '', $type) ?: 'ssl';
+        $tmpFile = $tmpDir . DIRECTORY_SEPARATOR . $safeType . '-' . $hash . '.pem';
+        if (!is_file($tmpFile)) {
+            @file_put_contents($tmpFile, $decoded);
+        }
+        if (!is_file($tmpFile)) {
+            return '';
+        }
+
+        self::$tempSslFiles[$hash] = $tmpFile;
+        return $tmpFile;
     }
 }

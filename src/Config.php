@@ -77,12 +77,31 @@ final class Config
             $app['session_save_path'] = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'odyssiavault-sessions';
         }
 
+        $databaseUrl = self::env('DATABASE_URL', self::env('DB_URL', ''));
+        if ($databaseUrl !== '') {
+            $parsedDb = self::parseDatabaseUrl($databaseUrl);
+            if ($parsedDb !== []) {
+                $db = array_merge($db, $parsedDb);
+            }
+        }
+
         $db['host'] = self::env('DB_HOST', (string)($db['host'] ?? '127.0.0.1'));
         $db['port'] = self::envInt('DB_PORT', (int)($db['port'] ?? 3306));
         $db['database'] = self::env('DB_DATABASE', (string)($db['database'] ?? ''));
         $db['username'] = self::env('DB_USERNAME', (string)($db['username'] ?? 'root'));
         $db['password'] = self::env('DB_PASSWORD', (string)($db['password'] ?? ''));
         $db['charset'] = self::env('DB_CHARSET', (string)($db['charset'] ?? 'utf8mb4'));
+        $db['ssl_mode'] = mb_strtoupper(self::env('DB_SSL_MODE', (string)($db['ssl_mode'] ?? 'DISABLED')));
+        $db['ssl_ca'] = self::env('DB_SSL_CA', (string)($db['ssl_ca'] ?? ''));
+        $db['ssl_ca_base64'] = self::env('DB_SSL_CA_BASE64', (string)($db['ssl_ca_base64'] ?? ''));
+        $db['ssl_cert'] = self::env('DB_SSL_CERT', (string)($db['ssl_cert'] ?? ''));
+        $db['ssl_cert_base64'] = self::env('DB_SSL_CERT_BASE64', (string)($db['ssl_cert_base64'] ?? ''));
+        $db['ssl_key'] = self::env('DB_SSL_KEY', (string)($db['ssl_key'] ?? ''));
+        $db['ssl_key_base64'] = self::env('DB_SSL_KEY_BASE64', (string)($db['ssl_key_base64'] ?? ''));
+        $db['ssl_verify_server_cert'] = self::envBool(
+            'DB_SSL_VERIFY_SERVER_CERT',
+            (bool)($db['ssl_verify_server_cert'] ?? false)
+        );
 
         $provider['api_url'] = self::env('PROVIDER_API_URL', (string)($provider['api_url'] ?? ''));
         $provider['api_key'] = self::env('PROVIDER_API_KEY', (string)($provider['api_key'] ?? ''));
@@ -249,5 +268,54 @@ final class Config
     private static function isVercel(): bool
     {
         return self::env('VERCEL', '') === '1' || self::env('VERCEL_ENV', '') !== '';
+    }
+
+    private static function parseDatabaseUrl(string $databaseUrl): array
+    {
+        $parts = parse_url($databaseUrl);
+        if (!is_array($parts)) {
+            return [];
+        }
+
+        $scheme = mb_strtolower((string)($parts['scheme'] ?? ''));
+        if ($scheme !== 'mysql') {
+            return [];
+        }
+
+        $parsed = [];
+        if (isset($parts['host'])) {
+            $parsed['host'] = (string)$parts['host'];
+        }
+        if (isset($parts['port'])) {
+            $parsed['port'] = (int)$parts['port'];
+        }
+
+        $path = trim((string)($parts['path'] ?? ''), '/');
+        if ($path !== '') {
+            $parsed['database'] = $path;
+        }
+
+        if (isset($parts['user'])) {
+            $parsed['username'] = rawurldecode((string)$parts['user']);
+        }
+        if (isset($parts['pass'])) {
+            $parsed['password'] = rawurldecode((string)$parts['pass']);
+        }
+
+        $query = [];
+        parse_str((string)($parts['query'] ?? ''), $query);
+        foreach (['ssl-mode', 'ssl_mode', 'sslmode'] as $key) {
+            if (!isset($query[$key])) {
+                continue;
+            }
+
+            $sslMode = trim((string)$query[$key]);
+            if ($sslMode !== '') {
+                $parsed['ssl_mode'] = mb_strtoupper($sslMode);
+                break;
+            }
+        }
+
+        return $parsed;
     }
 }
