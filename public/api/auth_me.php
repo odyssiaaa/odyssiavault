@@ -17,10 +17,10 @@ expireUnpaidOrders($pdo);
 $statsStmt = $pdo->prepare(
     'SELECT
         COUNT(*) AS total_orders,
-        COALESCE(SUM(CASE WHEN status = "Selesai" THEN total_sell_price ELSE 0 END), 0) AS total_spent,
-        COALESCE(SUM(CASE WHEN status = "Menunggu Pembayaran" THEN 1 ELSE 0 END), 0) AS waiting_orders,
-        COALESCE(SUM(CASE WHEN status = "Diproses" THEN 1 ELSE 0 END), 0) AS processing_orders,
-        COALESCE(SUM(CASE WHEN status = "Selesai" THEN 1 ELSE 0 END), 0) AS completed_orders
+        COALESCE(SUM(CASE WHEN status = \'Selesai\' THEN total_sell_price ELSE 0 END), 0) AS total_spent,
+        COALESCE(SUM(CASE WHEN status = \'Menunggu Pembayaran\' THEN 1 ELSE 0 END), 0) AS waiting_orders,
+        COALESCE(SUM(CASE WHEN status = \'Diproses\' THEN 1 ELSE 0 END), 0) AS processing_orders,
+        COALESCE(SUM(CASE WHEN status = \'Selesai\' THEN 1 ELSE 0 END), 0) AS completed_orders
      FROM orders
      WHERE user_id = :user_id'
 );
