@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 const AUTH_SESSION_KEY = 'auth_user_id';
+const AUTH_TOKEN_COOKIE = 'odyssiavault_auth';
+const AUTH_TOKEN_TTL_SECONDS = 2592000; // 30 hari
 
 function jsonResponse(array $payload, int $status = 200): void
 {
@@ -170,7 +172,7 @@ function startAppSession(array $appConfig): void
         session_name($sessionName);
     }
 
-    $isHttps = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+    $isHttps = isSecureRequest();
     session_set_cookie_params([
         'lifetime' => 0,
         'path' => '/',
@@ -185,6 +187,22 @@ function startAppSession(array $appConfig): void
 function authUser(PDO $pdo): ?array
 {
     $userId = (int)($_SESSION[AUTH_SESSION_KEY] ?? 0);
+    $fromPersistentCookie = false;
+
+    if ($userId <= 0) {
+        $tokenCookieName = authTokenCookieName();
+        $token = trim((string)($_COOKIE[$tokenCookieName] ?? ''));
+        $parsedToken = parseAuthToken($token);
+        if (is_array($parsedToken)) {
+            $candidateId = (int)($parsedToken['user_id'] ?? 0);
+            if ($candidateId > 0) {
+                $userId = $candidateId;
+                $_SESSION[AUTH_SESSION_KEY] = $userId;
+                $fromPersistentCookie = true;
+            }
+        }
+    }
+
     if ($userId <= 0) {
         return null;
     }
@@ -193,7 +211,17 @@ function authUser(PDO $pdo): ?array
     $stmt->execute(['id' => $userId]);
     $user = $stmt->fetch();
 
-    return is_array($user) ? $user : null;
+    if (!is_array($user)) {
+        unset($_SESSION[AUTH_SESSION_KEY]);
+        clearAuthTokenCookie();
+        return null;
+    }
+
+    if ($fromPersistentCookie) {
+        issueAuthTokenCookie((int)$user['id']);
+    }
+
+    return $user;
 }
 
 function requireAuth(PDO $pdo): array
@@ -223,6 +251,7 @@ function setAuthUser(int $userId): void
 {
     $_SESSION[AUTH_SESSION_KEY] = $userId;
     session_regenerate_id(true);
+    issueAuthTokenCookie($userId);
 }
 
 function logoutAuthUser(): void
@@ -241,7 +270,146 @@ function logoutAuthUser(): void
         ]);
     }
 
+    clearAuthTokenCookie();
+
     session_destroy();
+}
+
+function isSecureRequest(): bool
+{
+    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+        return true;
+    }
+
+    $forwardedProto = mb_strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''));
+    return $forwardedProto === 'https';
+}
+
+function readEnvValue(string $name, string $default = ''): string
+{
+    $value = $_ENV[$name] ?? $_SERVER[$name] ?? getenv($name);
+    if ($value === false || $value === null) {
+        return $default;
+    }
+
+    return trim((string)$value);
+}
+
+function authTokenCookieName(): string
+{
+    $name = readEnvValue('AUTH_TOKEN_COOKIE_NAME', AUTH_TOKEN_COOKIE);
+    if (preg_match('/^[A-Za-z0-9_-]{3,64}$/', $name) !== 1) {
+        return AUTH_TOKEN_COOKIE;
+    }
+
+    return $name;
+}
+
+function authTokenSecret(): string
+{
+    $secret = readEnvValue('APP_AUTH_SECRET', '');
+    if ($secret !== '') {
+        return $secret;
+    }
+
+    // fallback supaya tetap jalan di local/dev meskipun secret belum diset
+    return hash('sha256', AUTH_TOKEN_COOKIE . '::odyssiavault-fallback-secret');
+}
+
+function base64UrlEncode(string $value): string
+{
+    return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
+}
+
+function base64UrlDecode(string $value): ?string
+{
+    if ($value === '') {
+        return null;
+    }
+
+    $decoded = strtr($value, '-_', '+/');
+    $padding = strlen($decoded) % 4;
+    if ($padding > 0) {
+        $decoded .= str_repeat('=', 4 - $padding);
+    }
+
+    $result = base64_decode($decoded, true);
+    return is_string($result) ? $result : null;
+}
+
+function buildAuthToken(int $userId, int $expiresAt): string
+{
+    $message = sprintf('%d|%d', $userId, $expiresAt);
+    $signature = hash_hmac('sha256', $message, authTokenSecret());
+    return base64UrlEncode($message . '|' . $signature);
+}
+
+function parseAuthToken(string $token): ?array
+{
+    $decoded = base64UrlDecode($token);
+    if (!is_string($decoded) || $decoded === '') {
+        return null;
+    }
+
+    $parts = explode('|', $decoded, 3);
+    if (count($parts) !== 3) {
+        return null;
+    }
+
+    [$userIdRaw, $expiresRaw, $signature] = $parts;
+    if (!preg_match('/^\d+$/', $userIdRaw) || !preg_match('/^\d+$/', $expiresRaw)) {
+        return null;
+    }
+
+    $userId = (int)$userIdRaw;
+    $expiresAt = (int)$expiresRaw;
+    if ($userId <= 0 || $expiresAt <= time()) {
+        return null;
+    }
+
+    $message = $userIdRaw . '|' . $expiresRaw;
+    $expectedSignature = hash_hmac('sha256', $message, authTokenSecret());
+    if (!hash_equals($expectedSignature, $signature)) {
+        return null;
+    }
+
+    return [
+        'user_id' => $userId,
+        'expires_at' => $expiresAt,
+    ];
+}
+
+function issueAuthTokenCookie(int $userId): void
+{
+    if ($userId <= 0 || headers_sent()) {
+        return;
+    }
+
+    $expiresAt = time() + AUTH_TOKEN_TTL_SECONDS;
+    $token = buildAuthToken($userId, $expiresAt);
+
+    setcookie(authTokenCookieName(), $token, [
+        'expires' => $expiresAt,
+        'path' => '/',
+        'secure' => isSecureRequest(),
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
+}
+
+function clearAuthTokenCookie(): void
+{
+    if (headers_sent()) {
+        return;
+    }
+
+    setcookie(authTokenCookieName(), '', [
+        'expires' => time() - 42000,
+        'path' => '/',
+        'secure' => isSecureRequest(),
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
 }
 
 function mapProviderStatus(?string $status): string

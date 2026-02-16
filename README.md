@@ -171,6 +171,7 @@ Minimal isi:
 Direkomendasikan isi juga:
 - `APP_NAME` = `Odyssiavault`
 - `SESSION_NAME` = `odyssiavault_session`
+- `APP_AUTH_SECRET` = secret random panjang (wajib untuk login stabil di serverless)
 - `PROVIDER_REQUEST_CONTENT_TYPE` = `form`
 - `PRICING_DEFAULT_MARKUP_PERCENT` = `35`
 - `CHECKOUT_UNPAID_TIMEOUT_MINUTES` = `180`
