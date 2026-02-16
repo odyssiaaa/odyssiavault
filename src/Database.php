@@ -43,9 +43,43 @@ final class Database
         self::$schemaEnsured = true;
 
         try {
+            self::ensureBaseTables($pdo);
             self::ensureOrdersPaymentColumns($pdo);
         } catch (Throwable $e) {
             error_log('Database schema ensure failed: ' . $e->getMessage());
+        }
+    }
+
+    private static function ensureBaseTables(PDO $pdo): void
+    {
+        $coreTables = ['users', 'orders', 'order_refills', 'balance_transactions', 'deposit_requests', 'news_posts'];
+        $allExists = true;
+        foreach ($coreTables as $table) {
+            if (!self::tableExists($pdo, $table)) {
+                $allExists = false;
+                break;
+            }
+        }
+
+        if ($allExists) {
+            return;
+        }
+
+        $schemaPath = dirname(__DIR__) . '/database/schema.sql';
+        if (!is_file($schemaPath)) {
+            return;
+        }
+
+        $schemaSql = file_get_contents($schemaPath);
+        if (!is_string($schemaSql) || trim($schemaSql) === '') {
+            return;
+        }
+
+        $schemaSql = preg_replace('/^\s*CREATE\s+DATABASE\b[^;]*;\s*$/im', '', $schemaSql) ?? $schemaSql;
+        $schemaSql = preg_replace('/^\s*USE\b[^;]*;\s*$/im', '', $schemaSql) ?? $schemaSql;
+
+        foreach (self::splitSqlStatements($schemaSql) as $statement) {
+            $pdo->exec($statement);
         }
     }
 
@@ -118,6 +152,57 @@ final class Database
             $definition
         );
         $pdo->exec($sql);
+    }
+
+    private static function splitSqlStatements(string $sql): array
+    {
+        $statements = [];
+        $buffer = '';
+        $length = strlen($sql);
+        $inSingleQuote = false;
+        $inDoubleQuote = false;
+
+        for ($i = 0; $i < $length; $i++) {
+            $char = $sql[$i];
+            $next = ($i + 1 < $length) ? $sql[$i + 1] : '';
+
+            if (!$inSingleQuote && !$inDoubleQuote && $char === '-' && $next === '-') {
+                while ($i < $length && $sql[$i] !== "\n") {
+                    $i++;
+                }
+                continue;
+            }
+
+            if ($char === "'" && !$inDoubleQuote) {
+                $escaped = $i > 0 && $sql[$i - 1] === '\\';
+                if (!$escaped) {
+                    $inSingleQuote = !$inSingleQuote;
+                }
+            } elseif ($char === '"' && !$inSingleQuote) {
+                $escaped = $i > 0 && $sql[$i - 1] === '\\';
+                if (!$escaped) {
+                    $inDoubleQuote = !$inDoubleQuote;
+                }
+            }
+
+            if ($char === ';' && !$inSingleQuote && !$inDoubleQuote) {
+                $statement = trim($buffer);
+                if ($statement !== '') {
+                    $statements[] = $statement;
+                }
+                $buffer = '';
+                continue;
+            }
+
+            $buffer .= $char;
+        }
+
+        $tail = trim($buffer);
+        if ($tail !== '') {
+            $statements[] = $tail;
+        }
+
+        return $statements;
     }
 
     private static function applySslOptions(array &$pdoOptions, array $config): void
