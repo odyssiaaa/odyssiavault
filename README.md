@@ -2,6 +2,8 @@
 
 ## Fitur Utama
 - Website fokus buyer/customer Odyssiavault.
+- Arsitektur buyer dipisah jelas: `SSM Panel` dan `Topup Game` pada halaman/menu berbeda.
+- Mode saat ini: `Topup Game` ditampilkan sebagai **Coming Soon** (sementara nonaktif untuk publik).
 - Login & register user (session PHP) dengan proses cepat.
 - Pembayaran direct tanpa deposit/wallet.
 - Search bar kategori & layanan dengan prioritas hasil relevan.
@@ -19,12 +21,13 @@
   - `komen`, `comments`, `usernames`, `username`, `hashtags`, `keywords`.
   - quantity otomatis untuk tipe Comment, Comment Replies, dan Mentions Custom List.
 - Order ke provider dengan markup harga otomatis.
+- Integrasi topup game via API `mengtopup` (service/order/status) dengan checkout terpisah dari SSM.
 - Riwayat order user + cek status order provider.
 - Fitur refill provider:
   - ajukan refill berdasarkan ID order.
   - cek status refill (`status_refill`) dari provider.
   - riwayat refill tersimpan per user.
-- Dashboard buyer bergaya panel (menu Dashboard/Top 5/Pembelian/Refill/Pembayaran/Tiket/Daftar Layanan/Halaman).
+- Dashboard buyer bergaya panel rapi (Utama, Dashboard, SSM Order, Layanan SSM, Top 5 SSM, Refill SSM, Topup Game, Tiket, Halaman).
 - Sistem tiket laporan (buat tiket, balas tiket, tutup/buka kembali, riwayat tiket).
 - Dashboard awal difokuskan untuk berita/pengumuman/update layanan.
 - Sistem berita otomatis dari API provider (mode `provider_only`), dengan opsi hybrid/manual.
@@ -58,9 +61,12 @@ Pastikan project di:
 Edit `config/config.php`:
 - `db` (host, database, username, password).
 - `provider.api_key` dan `provider.secret_key`.
+- `game_provider.api_key` untuk provider topup game (`https://api.mengtopup.id`).
+- Pastikan IP hosting kamu sudah di-whitelist di provider topup game (mengtopup) agar endpoint `service/order/status` tidak ditolak 403.
 - `provider.request_content_type`:
   - `form` (default) atau `json`.
 - `pricing` untuk aturan markup.
+- `game_pricing` untuk aturan markup khusus topup game.
 - `checkout` untuk direct payment:
   - `unpaid_timeout_minutes` (batas bayar otomatis cancel)
   - `payment_methods` (BCA / DANA / GoPay)
@@ -119,6 +125,10 @@ Konfigurasi sumber berita (`config/config.php`):
    - `cancel` -> status `Dibatalkan`
 5. Status provider sukses akan menjadi `Selesai`.
 6. Jika tidak dibayar sampai batas waktu, order otomatis `Dibatalkan`.
+
+Mode yang disarankan untuk hosting gratis (InfinityFree):
+- Nonaktifkan payment gateway webhook (`payment_gateway.enabled = false`).
+- Gunakan alur manual ACC admin agar stabil.
 
 Catatan: endpoint `public/api/profile.php` hanya bisa diakses admin, jadi data profile/saldo provider tidak terekspos ke buyer.
 

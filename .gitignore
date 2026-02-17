@@ -12,3 +12,9 @@ storage/cache/
 .codex_tmp*
 ._tmp*
 scripts_simulate_*.js
+
+# Runtime generated files
+storage/logs/*.log
+storage/sessions/sess_*
+!storage/logs/.gitkeep
+!storage/sessions/.gitkeep

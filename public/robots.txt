@@ -1,0 +1,14 @@
+User-agent: *
+Allow: /
+
+# Halaman internal (login/admin) tidak perlu diindeks.
+Disallow: /api/
+Disallow: /?page=admin
+Disallow: /?page=dashboard
+Disallow: /?page=ticket
+Disallow: /?page=deposit
+Disallow: /?page=refill
+Disallow: /?page=profile
+
+Sitemap: https://odyssiavault.gt.tc/sitemap.xml
+

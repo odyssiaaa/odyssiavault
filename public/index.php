@@ -6,31 +6,133 @@ require_once __DIR__ . '/../src/Config.php';
 $config = Config::load();
 $appConfig = (array)($config['app'] ?? []);
 $appName = htmlspecialchars((string)($appConfig['name'] ?? 'Odyssiavault'), ENT_QUOTES, 'UTF-8');
-$logoPath = htmlspecialchars((string)($appConfig['logo_path'] ?? 'assets/logo.png'), ENT_QUOTES, 'UTF-8');
-$shareUrl = htmlspecialchars(trim((string)($appConfig['base_url'] ?? '')), ENT_QUOTES, 'UTF-8');
+$gameTopupEnabled = parseLooseBool($appConfig['game_topup_enabled'] ?? false, false);
+$gameTopupComingSoon = $gameTopupEnabled ? '0' : '1';
+$gameTopupMenuLabel = $gameTopupEnabled ? 'Topup Game' : 'Topup Game (Coming Soon)';
+$logoPathRaw = (string)($appConfig['logo_path'] ?? 'assets/logo.png');
+$logoPath = htmlspecialchars($logoPathRaw, ENT_QUOTES, 'UTF-8');
+$baseUrlRaw = trim((string)($appConfig['base_url'] ?? ''));
+$detectedHost = trim((string)($_SERVER['HTTP_HOST'] ?? ''));
+$detectedScheme = isSecureRequest() ? 'https' : 'http';
+$baseUrl = $baseUrlRaw !== ''
+    ? rtrim($baseUrlRaw, '/')
+    : ($detectedHost !== '' ? $detectedScheme . '://' . $detectedHost : '');
+$shareUrl = htmlspecialchars($baseUrl, ENT_QUOTES, 'UTF-8');
+$canonicalUrlRaw = $baseUrl !== '' ? ($baseUrl . '/') : '';
+$canonicalUrl = htmlspecialchars($canonicalUrlRaw !== '' ? $canonicalUrlRaw : './', ENT_QUOTES, 'UTF-8');
+$logoPathRelative = ltrim(preg_replace('/^\.?\//', '', $logoPathRaw), '/');
+$logoUrlRaw = '';
+if (preg_match('/^https?:\/\//i', $logoPathRaw) === 1) {
+    $logoUrlRaw = $logoPathRaw;
+} elseif ($baseUrl !== '') {
+    $logoUrlRaw = $baseUrl . '/' . $logoPathRelative;
+}
+$logoUrl = htmlspecialchars($logoUrlRaw, ENT_QUOTES, 'UTF-8');
+$seoTitleRaw = ($appConfig['seo_title'] ?? '') !== ''
+    ? (string)$appConfig['seo_title']
+    : 'Odyssiavault - Top Up Game, SMM Panel, dan Digital Services';
+$seoDescriptionRaw = ($appConfig['seo_description'] ?? '') !== ''
+    ? (string)$appConfig['seo_description']
+    : 'Odyssiavault adalah platform top up game, SMM panel, dan layanan digital untuk buyer. Proses cepat, aman, dan mudah dipakai pemula.';
+$seoKeywordsRaw = ($appConfig['seo_keywords'] ?? '') !== ''
+    ? (string)$appConfig['seo_keywords']
+    : 'odyssiavault, top up game, smm panel indonesia, layanan digital, follower, likes, views, kebsos';
+$seoTitle = htmlspecialchars($seoTitleRaw, ENT_QUOTES, 'UTF-8');
+$seoDescription = htmlspecialchars($seoDescriptionRaw, ENT_QUOTES, 'UTF-8');
+$seoKeywords = htmlspecialchars($seoKeywordsRaw, ENT_QUOTES, 'UTF-8');
+$twitterCard = $logoUrlRaw !== '' ? 'summary_large_image' : 'summary';
 $paymentConfig = (array)($config['payment'] ?? []);
+$paymentGatewayConfig = (array)($config['payment_gateway'] ?? []);
+$paymentGatewayEnabled = parseLooseBool($paymentGatewayConfig['enabled'] ?? false, false) ? '1' : '0';
+$paymentGatewayProvider = htmlspecialchars(mb_strtolower(trim((string)($paymentGatewayConfig['provider'] ?? 'custom'))), ENT_QUOTES, 'UTF-8');
 $qrisPath = htmlspecialchars((string)($paymentConfig['qris_image'] ?? 'assets/qris.png'), ENT_QUOTES, 'UTF-8');
 $paymentMethods = checkoutPaymentMethods($config);
 $paymentMethodsJson = htmlspecialchars((string)json_encode($paymentMethods, JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8');
-$allowedViews = ['dashboard', 'profile', 'top5', 'purchase', 'refill', 'deposit', 'ticket', 'services', 'pages', 'admin'];
-$requestedView = mb_strtolower(trim((string)($_GET['page'] ?? 'dashboard')));
-$initialView = in_array($requestedView, $allowedViews, true) ? $requestedView : 'dashboard';
+$allowedViews = ['utama', 'dashboard', 'profile', 'top5', 'purchase', 'refill', 'game', 'deposit', 'ticket', 'services', 'pages', 'admin'];
+$requestedView = mb_strtolower(trim((string)($_GET['page'] ?? 'utama')));
+$initialView = in_array($requestedView, $allowedViews, true) ? $requestedView : 'utama';
 $cssVersion = (string)(@filemtime(__DIR__ . '/assets/app.css') ?: time());
 $jsVersion = (string)(@filemtime(__DIR__ . '/assets/app.js') ?: time());
 $indexVersion = (string)(@filemtime(__FILE__) ?: time());
 $buildTag = htmlspecialchars(substr(sha1($cssVersion . '-' . $jsVersion . '-' . $indexVersion), 0, 12), ENT_QUOTES, 'UTF-8');
+$schemaItems = [];
+if ($canonicalUrlRaw !== '') {
+    $schemaItems[] = [
+        '@context' => 'https://schema.org',
+        '@type' => 'Organization',
+        'name' => trim((string)($appConfig['name'] ?? 'Odyssiavault')) !== '' ? trim((string)$appConfig['name']) : 'Odyssiavault',
+        'url' => $canonicalUrlRaw,
+        'logo' => $logoUrlRaw !== '' ? $logoUrlRaw : null,
+        'sameAs' => [
+            'https://instagram.com/odyssiavault',
+            'https://wa.me/6285178232383',
+            'https://chat.whatsapp.com/I1HfRLDI9ie3xjItKj7e41',
+        ],
+        'contactPoint' => [
+            [
+                '@type' => 'ContactPoint',
+                'contactType' => 'customer service',
+                'telephone' => '+62-851-7823-2383',
+                'availableLanguage' => ['id', 'en'],
+            ],
+        ],
+    ];
+    $schemaItems[] = [
+        '@context' => 'https://schema.org',
+        '@type' => 'WebSite',
+        'name' => trim((string)($appConfig['name'] ?? 'Odyssiavault')) !== '' ? trim((string)$appConfig['name']) : 'Odyssiavault',
+        'url' => $canonicalUrlRaw,
+        'description' => $seoDescriptionRaw,
+        'inLanguage' => 'id-ID',
+    ];
+}
 ?>
 <!doctype html>
 <html lang="id">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title><?= $appName ?> - Panel Topup</title>
+  <title><?= $seoTitle ?></title>
+  <meta name="description" content="<?= $seoDescription ?>">
+  <meta name="keywords" content="<?= $seoKeywords ?>">
+  <meta name="robots" content="index,follow,max-snippet:-1,max-image-preview:large,max-video-preview:-1">
+  <meta name="author" content="<?= $appName ?>">
+  <meta name="theme-color" content="#1b0a36">
+  <link rel="canonical" href="<?= $canonicalUrl ?>">
+  <meta property="og:locale" content="id_ID">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="<?= $appName ?>">
+  <meta property="og:title" content="<?= $seoTitle ?>">
+  <meta property="og:description" content="<?= $seoDescription ?>">
+  <meta property="og:url" content="<?= $canonicalUrl ?>">
+<?php if ($logoUrlRaw !== ''): ?>
+  <meta property="og:image" content="<?= $logoUrl ?>">
+<?php endif; ?>
+  <meta name="twitter:card" content="<?= htmlspecialchars($twitterCard, ENT_QUOTES, 'UTF-8') ?>">
+  <meta name="twitter:title" content="<?= $seoTitle ?>">
+  <meta name="twitter:description" content="<?= $seoDescription ?>">
+<?php if ($logoUrlRaw !== ''): ?>
+  <meta name="twitter:image" content="<?= $logoUrl ?>">
+<?php endif; ?>
+  <link rel="icon" href="<?= $logoPath ?>">
+  <link rel="apple-touch-icon" href="<?= $logoPath ?>">
+<?php foreach ($schemaItems as $schemaItem): ?>
+  <script type="application/ld+json"><?= json_encode($schemaItem, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?></script>
+<?php endforeach; ?>
   <link rel="stylesheet" href="./assets/app.css?v=<?= htmlspecialchars($cssVersion, ENT_QUOTES, 'UTF-8') ?>">
 </head>
 <body>
-  <div class="page" data-app-name="<?= $appName ?>" data-share-url="<?= $shareUrl ?>" data-logo-path="<?= $logoPath ?>" data-payment-methods="<?= $paymentMethodsJson ?>" data-qris-path="<?= $qrisPath ?>" data-initial-view="<?= htmlspecialchars($initialView, ENT_QUOTES, 'UTF-8') ?>" data-build="<?= $buildTag ?>">
-    <section id="authView" class="auth-shell hidden">
+  <noscript>
+    <div style="padding:12px;margin:10px;border:1px solid #5f31aa;border-radius:10px;background:#170632;color:#f7f2ff;font-family:Arial,sans-serif;">
+      Aktifkan JavaScript untuk pengalaman terbaik di Odyssiavault.
+      Halaman penting:
+      <a href="./" style="color:#d9b8ff;">Home</a> |
+      <a href="./?page=services" style="color:#d9b8ff;">Daftar Layanan</a> |
+      <a href="./?page=pages" style="color:#d9b8ff;">Kontak & Ketentuan</a>.
+    </div>
+  </noscript>
+  <div class="page" data-app-name="<?= $appName ?>" data-share-url="<?= $shareUrl ?>" data-logo-path="<?= $logoPath ?>" data-payment-methods="<?= $paymentMethodsJson ?>" data-qris-path="<?= $qrisPath ?>" data-payment-gateway-enabled="<?= $paymentGatewayEnabled ?>" data-payment-gateway-provider="<?= $paymentGatewayProvider ?>" data-game-topup-coming-soon="<?= htmlspecialchars($gameTopupComingSoon, ENT_QUOTES, 'UTF-8') ?>" data-initial-view="<?= htmlspecialchars($initialView, ENT_QUOTES, 'UTF-8') ?>" data-build="<?= $buildTag ?>">
+    <section id="authView" class="auth-shell">
       <div class="auth-card">
         <span class="badge">Odyssiavault - SMM & Kebsos Marketplace</span>
         <div class="brand">
@@ -44,6 +146,10 @@ $buildTag = htmlspecialchars(substr(sha1($cssVersion . '-' . $jsVersion . '-' . 
           <div>Registrasi cepat, cukup username dan password.</div>
           <div>Pilih layanan, isi target, lalu checkout dalam satu halaman.</div>
           <div>Riwayat order dan status berjalan real-time.</div>
+        </div>
+        <div class="public-links">
+          <a href="./?page=services">Lihat Daftar Layanan</a>
+          <a href="./?page=pages">Kontak & Ketentuan</a>
         </div>
       </div>
 
@@ -91,22 +197,28 @@ $buildTag = htmlspecialchars(substr(sha1($cssVersion . '-' . $jsVersion . '-' . 
           <div><strong><?= $appName ?></strong><span>Buyer Information Center</span></div>
         </div>
         <nav class="menu">
+          <span class="menu-label">Buyer Menu</span>
+          <a href="./?page=utama" data-view="utama" class="<?= $initialView === 'utama' ? 'active' : '' ?>">Utama</a>
           <a href="./?page=dashboard" data-view="dashboard" class="<?= $initialView === 'dashboard' ? 'active' : '' ?>">Dashboard</a>
-          <a href="./?page=top5" data-view="top5" class="<?= $initialView === 'top5' ? 'active' : '' ?>">Top 5</a>
-          <a href="./?page=purchase" data-view="purchase" class="<?= $initialView === 'purchase' ? 'active' : '' ?>">Pembelian</a>
-          <a href="./?page=refill" data-view="refill" class="<?= $initialView === 'refill' ? 'active' : '' ?>">Refill</a>
-          <a href="./?page=deposit" data-view="deposit" class="<?= $initialView === 'deposit' ? 'active' : '' ?>">Deposit</a>
+          <span class="menu-label">SSM Panel</span>
+          <a href="./?page=purchase" data-view="purchase" class="<?= $initialView === 'purchase' ? 'active' : '' ?>">SSM Order</a>
+          <a href="./?page=services" data-view="services" class="<?= $initialView === 'services' ? 'active' : '' ?>">Layanan SSM</a>
+          <a href="./?page=top5" data-view="top5" class="<?= $initialView === 'top5' ? 'active' : '' ?>">Top 5 SSM</a>
+          <a href="./?page=refill" data-view="refill" class="<?= $initialView === 'refill' ? 'active' : '' ?>">Refill SSM</a>
+          <span class="menu-label">Topup Game</span>
+          <a href="./?page=game" data-view="game" class="<?= $initialView === 'game' ? 'active' : '' ?>"><?= htmlspecialchars($gameTopupMenuLabel, ENT_QUOTES, 'UTF-8') ?></a>
+          <span class="menu-label">Support</span>
           <a href="./?page=ticket" data-view="ticket" class="<?= $initialView === 'ticket' ? 'active' : '' ?>">Tiket</a>
-          <a id="adminMenuLink" href="./?page=admin" data-view="admin" class="<?= $initialView === 'admin' ? 'active' : '' ?> hidden">Admin Panel</a>
-          <a href="./?page=services" data-view="services" class="<?= $initialView === 'services' ? 'active' : '' ?>">Daftar Layanan</a>
           <a href="./?page=pages" data-view="pages" class="<?= $initialView === 'pages' ? 'active' : '' ?>">Halaman</a>
+          <span class="menu-label">Admin</span>
+          <a id="adminMenuLink" href="./?page=admin" data-view="admin" class="<?= $initialView === 'admin' ? 'active' : '' ?> hidden">Admin Panel</a>
         </nav>
       </aside>
 
       <main class="main">
-        <header id="dashboardSection" class="topbar" data-view-section="dashboard,profile,top5,purchase,refill,deposit,ticket,services,pages,admin">
+        <header id="dashboardSection" class="topbar" data-view-section="utama,dashboard,profile,top5,purchase,refill,game,deposit,ticket,services,pages,admin">
           <div>
-            <h2>Dashboard Odyssiavault</h2>
+            <h2 id="topbarTitle">Dashboard Odyssiavault</h2>
             <p id="welcomeText">Memuat akun buyer...</p>
           </div>
           <div class="actions">
@@ -128,7 +240,7 @@ $buildTag = htmlspecialchars(substr(sha1($cssVersion . '-' . $jsVersion . '-' . 
             </div>
           </div>
         </header>
-        <section id="panelInfoSection" class="panel-info-bar" data-view-section="dashboard,profile,top5,purchase,refill,deposit,ticket,services,pages,admin">
+        <section id="panelInfoSection" class="panel-info-bar" data-view-section="utama,dashboard,profile,top5,purchase,refill,game,deposit,ticket,services,pages,admin">
           <div class="panel-info-label">Info Panel</div>
           <div class="panel-info-track">
             <div id="panelInfoTickerText" class="panel-info-ticker">Memuat informasi panel...</div>
@@ -136,6 +248,31 @@ $buildTag = htmlspecialchars(substr(sha1($cssVersion . '-' . $jsVersion . '-' . 
           <div class="panel-info-actions">
             <button id="panelInfoRefreshBtn" type="button" class="ghost mini-btn">Refresh Info</button>
             <button id="panelInfoCloseBtn" type="button" class="ghost mini-btn">Tutup</button>
+          </div>
+        </section>
+        <section id="utamaSection" class="card utama-card" data-view-section="utama">
+          <div class="utama-hero">
+            <span class="badge">Pusat Pembelian Odyssiavault</span>
+            <h3>Mulai Dari Sini</h3>
+            <p class="muted">Pilih jalur belanja sesuai kebutuhan kamu, lalu lanjutkan checkout dengan cepat.</p>
+          </div>
+          <div class="entry-grid">
+            <article class="entry-card">
+              <div class="entry-card-head">
+                <strong>SSM Panel</strong>
+                <span>Layanan Sosial Media</span>
+              </div>
+              <p class="entry-card-desc">Cocok untuk followers, likes, views, komentar, dan kebutuhan engagement lainnya.</p>
+              <button type="button" class="entry-btn" data-quick-view="purchase">Pilih SSM</button>
+            </article>
+            <article class="entry-card">
+              <div class="entry-card-head">
+                <strong>Topup Game</strong>
+                <span>Produk Game & Voucher</span>
+              </div>
+              <p class="entry-card-desc">Masuk ke daftar layanan untuk cari layanan game sesuai ID atau nama produk.</p>
+              <button type="button" class="entry-btn" data-quick-view="game">Pilih Topup Game</button>
+            </article>
           </div>
         </section>
         <section class="stats" data-view-section="dashboard">
@@ -149,9 +286,10 @@ $buildTag = htmlspecialchars(substr(sha1($cssVersion . '-' . $jsVersion . '-' . 
             <span class="muted">Navigasi ringkas untuk buyer</span>
           </div>
           <div class="quick-actions">
-            <button type="button" class="quick-action-btn" data-quick-view="purchase">Buat Pesanan</button>
+            <button type="button" class="quick-action-btn" data-quick-view="purchase">Buat Pesanan SSM</button>
+            <button type="button" class="quick-action-btn" data-quick-view="game">Topup Game</button>
             <button type="button" class="quick-action-btn" data-quick-view="top5">Top 5</button>
-            <button type="button" class="quick-action-btn" data-quick-view="services">Daftar Layanan</button>
+            <button type="button" class="quick-action-btn" data-quick-view="services">Layanan SSM</button>
             <button type="button" class="quick-action-btn" data-quick-view="ticket">Buat Tiket</button>
           </div>
         </section>
@@ -758,7 +896,7 @@ $buildTag = htmlspecialchars(substr(sha1($cssVersion . '-' . $jsVersion . '-' . 
         </section>
 
         <section id="adminSection" class="card hidden" data-view-section="admin">
-          <h3>Panel Admin - ACC Pembayaran</h3>
+          <h3>Panel Admin - ACC Pembayaran SSM & Monitoring</h3>
           <p class="muted" style="margin:0 0 10px;">Halaman khusus admin untuk verifikasi pembayaran buyer agar proses order ke server layanan lebih cepat.</p>
           <div id="adminPaymentSection" class="hidden">
             <div class="table-wrap">
@@ -837,6 +975,30 @@ $buildTag = htmlspecialchars(substr(sha1($cssVersion . '-' . $jsVersion . '-' . 
             <div id="adminOrderHistoryPagination" class="pagination"></div>
             <div id="adminOrderHistoryNotice" class="notice info hidden"></div>
           </div>
+
+          <div id="adminCsSection" class="hidden" style="margin-top:14px;">
+            <div class="headline-row" style="margin-bottom:10px;">
+              <h3 style="margin:0;">Live Chat Customer Service</h3>
+              <button id="adminCsRefreshBtn" type="button" class="ghost mini-btn">Refresh Chat CS</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID Chat</th>
+                    <th>Buyer</th>
+                    <th>Mode</th>
+                    <th>Status</th>
+                    <th>Pesan Terakhir</th>
+                    <th>Update</th>
+                    <th>Aksi</th>
+                  </tr>
+                </thead>
+                <tbody id="adminCsBody"><tr><td colspan="7">Belum ada chat customer service.</td></tr></tbody>
+              </table>
+            </div>
+            <div id="adminCsNotice" class="notice info hidden"></div>
+          </div>
         </section>
 
         <section id="servicesSection" class="card" data-view-section="services">
@@ -897,6 +1059,143 @@ $buildTag = htmlspecialchars(substr(sha1($cssVersion . '-' . $jsVersion . '-' . 
             </table>
           </div>
           <div id="servicesCatalogPagination" class="pagination"></div>
+        </section>
+
+        <section id="gameSection" class="card" data-view-section="game">
+          <h3>Topup Game</h3>
+<?php if ($gameTopupComingSoon === '1'): ?>
+          <div class="box" id="gameComingSoonBanner">
+            Fitur Topup Game sedang tahap finalisasi dan akan segera hadir. Silakan gunakan layanan SSM terlebih dahulu.
+          </div>
+<?php endif; ?>
+          <div class="info-alert">
+            <strong>Flow Topup Game</strong>
+            <span>Pilih produk game -> isi ID target + kontak -> checkout -> bayar QRIS -> konfirmasi -> admin verifikasi -> order otomatis diproses.</span>
+          </div>
+
+          <div class="order-layout">
+            <form id="gameOrderForm" class="form-grid" novalidate>
+              <div class="two">
+                <div>
+                  <label>Kategori Game</label>
+                  <select id="gameCategorySelect">
+                    <option value="">Semua Kategori</option>
+                  </select>
+                </div>
+                <div>
+                  <label>Cari Layanan Game (ID / Nama)</label>
+                  <div class="suggestion-field">
+                    <input id="gameServiceInput" placeholder="Ketik kode layanan atau nama produk game..." autocomplete="off" required>
+                    <div id="gameServiceSuggestPanel" class="suggest-panel hidden" role="listbox" aria-label="Saran layanan game"></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="three">
+                <div>
+                  <label>ID Target Game</label>
+                  <input id="gameTargetInput" placeholder="Contoh: 12345678|1234 atau 12345678" required>
+                </div>
+                <div>
+                  <label>Kontak WhatsApp</label>
+                  <input id="gameContactInput" placeholder="Contoh: 62812xxxxxxx" required>
+                </div>
+                <div>
+                  <label>Harga</label>
+                  <input id="gamePriceView" value="Rp0" readonly>
+                </div>
+              </div>
+
+              <div id="gameServiceInfo" class="box">Mulai ketik layanan game untuk melihat detail produk.</div>
+              <button type="submit">Checkout Topup Game</button>
+              <div id="gameOrderNotice" class="notice info hidden"></div>
+            </form>
+
+            <aside class="order-side">
+              <div class="box">
+                <strong>Panduan Format Target</strong>
+                <ul class="info-list" style="margin-top:8px;">
+                  <li>Game dengan zone/server: format <code>ID|ZONE</code> (contoh <code>12345678|1234</code>).</li>
+                  <li>Game tanpa zone/server: cukup <code>ID</code> saja.</li>
+                  <li>Pastikan ID target benar. Salah input tidak bisa direfund.</li>
+                </ul>
+              </div>
+              <div class="box">
+                <strong>Panduan Buyer</strong>
+                <ul class="info-list" style="margin-top:8px;">
+                  <li>1 checkout = 1 produk topup game.</li>
+                  <li>Setelah bayar QRIS, klik konfirmasi untuk masuk antrean admin.</li>
+                  <li>Status dipantau di riwayat topup game pada halaman ini.</li>
+                </ul>
+              </div>
+            </aside>
+          </div>
+
+          <h3 style="margin-top:14px;">Riwayat Topup Game</h3>
+          <div class="headline-row">
+            <div id="gameHistorySummary" class="muted">Menampilkan 0 data</div>
+            <button id="gameHistoryRefreshBtn" type="button" class="ghost mini-btn">Refresh Riwayat Game</button>
+          </div>
+          <div class="three" style="margin-top:10px;">
+            <div>
+              <label>Filter Status</label>
+              <select id="gameHistoryStatus">
+                <option value="ALL">Semua</option>
+                <option value="Menunggu Pembayaran">Menunggu Pembayaran</option>
+                <option value="Diproses">Diproses</option>
+                <option value="Selesai">Selesai</option>
+                <option value="Dibatalkan">Dibatalkan</option>
+              </select>
+            </div>
+            <div>
+              <label>Cari ID Order</label>
+              <input id="gameHistoryIdSearch" placeholder="Masukkan ID order game">
+            </div>
+            <div>
+              <label>Cari Layanan</label>
+              <input id="gameHistoryServiceSearch" placeholder="Masukkan nama layanan game">
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID Lokal</th>
+                  <th>Produk</th>
+                  <th>Target</th>
+                  <th>Kontak</th>
+                  <th>Total Bayar</th>
+                  <th>Status</th>
+                  <th>Provider</th>
+                  <th>Tanggal</th>
+                  <th>Aksi</th>
+                </tr>
+              </thead>
+              <tbody id="gameOrdersBody"><tr><td colspan="9">Belum ada order topup game.</td></tr></tbody>
+            </table>
+          </div>
+          <div id="gameOrderNoticeBottom" class="notice info hidden"></div>
+
+          <div id="gameAdminPendingPanel" class="hidden" style="margin-top:14px;">
+            <h3 style="margin:0 0 10px;">Verifikasi Pembayaran Topup Game (Admin)</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>User</th>
+                    <th>Produk</th>
+                    <th>Total</th>
+                    <th>Konfirmasi Buyer</th>
+                    <th>Batas Bayar</th>
+                    <th>Aksi</th>
+                  </tr>
+                </thead>
+                <tbody id="gameAdminPendingBody"><tr><td colspan="7">Tidak ada pembayaran game yang menunggu verifikasi.</td></tr></tbody>
+              </table>
+            </div>
+            <div id="gameAdminPendingNotice" class="notice info hidden"></div>
+          </div>
         </section>
 
         <section id="contactSection" class="card" data-view-section="pages">
@@ -1006,6 +1305,33 @@ $buildTag = htmlspecialchars(substr(sha1($cssVersion . '-' . $jsVersion . '-' . 
         <button id="paymentQrToHistory" type="button" class="mini-btn">Buka Riwayat</button>
       </div>
     </div>
+  </div>
+  <div id="csChatWidget" class="cs-chat-widget hidden">
+    <button id="csChatToggle" type="button" class="cs-chat-toggle" aria-expanded="false" aria-controls="csChatPanel">
+      <span class="cs-chat-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 3C6.48 3 2 6.94 2 11.8c0 2.72 1.39 5.15 3.58 6.75L4 22l4.19-2.3c1.18.33 2.46.51 3.81.51 5.52 0 10-3.94 10-8.8S17.52 3 12 3Zm-4 8h8v1.6H8V11Zm0-3h8v1.6H8V8Zm0 6h5v1.6H8V14Z"></path></svg>
+      </span>
+      <span class="cs-chat-label">CS</span>
+      <span id="csChatUnread" class="cs-chat-unread hidden">0</span>
+    </button>
+    <section id="csChatPanel" class="cs-chat-panel hidden" aria-live="polite">
+      <header class="cs-chat-header">
+        <div>
+          <h4>Customer Service</h4>
+          <p id="csChatModeText">Bot aktif</p>
+        </div>
+        <div class="cs-chat-header-actions">
+          <button id="csChatTakeoverBtn" type="button" class="ghost mini-btn hidden">Ambil Alih</button>
+          <button id="csChatCloseBtn" type="button" class="ghost mini-btn">Tutup</button>
+        </div>
+      </header>
+      <div id="csChatMessages" class="cs-chat-messages"></div>
+      <div id="csChatNotice" class="notice info hidden"></div>
+      <form id="csChatForm" class="cs-chat-form">
+        <textarea id="csChatInput" rows="2" maxlength="2000" placeholder="Tulis pesan ke customer service..."></textarea>
+        <button id="csChatSendBtn" type="submit" class="mini-btn">Kirim</button>
+      </form>
+    </section>
   </div>
   <script src="./assets/app.js?v=<?= htmlspecialchars($jsVersion, ENT_QUOTES, 'UTF-8') ?>"></script>
 </body>

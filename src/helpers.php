@@ -627,6 +627,22 @@ function expireUnpaidOrders(PDO $pdo): void
             'waiting_status' => 'Menunggu Pembayaran',
             'now' => nowDateTime(),
         ]);
+
+        $gameStmt = $pdo->prepare(
+            'UPDATE game_orders
+             SET status = :cancelled_status, error_message = :error_message, updated_at = :updated_at
+             WHERE status = :waiting_status
+               AND payment_deadline_at IS NOT NULL
+               AND payment_deadline_at < :now
+               AND payment_confirmed_at IS NULL'
+        );
+        $gameStmt->execute([
+            'cancelled_status' => 'Dibatalkan',
+            'error_message' => 'Batas waktu pembayaran habis',
+            'updated_at' => nowDateTime(),
+            'waiting_status' => 'Menunggu Pembayaran',
+            'now' => nowDateTime(),
+        ]);
     } catch (Throwable $e) {
         // Ignore auto-expire failures to avoid blocking core requests.
     }
@@ -889,6 +905,9 @@ function httpPostUrlEncoded(string $url, array $payload, array $headers = [], in
         CURLOPT_HTTPHEADER => $normalizedHeaders,
         CURLOPT_POSTFIELDS => $streamBody,
     ]);
+    if (defined('CURL_IPRESOLVE_V4')) {
+        curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    }
 
     $result = curl_exec($ch);
     $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -943,6 +962,9 @@ function httpPostJson(string $url, array $payload, array $headers = [], int $tim
         CURLOPT_HTTPHEADER => $normalizedHeaders,
         CURLOPT_POSTFIELDS => $jsonPayload,
     ]);
+    if (defined('CURL_IPRESOLVE_V4')) {
+        curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    }
 
     $result = curl_exec($ch);
     $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -989,6 +1011,9 @@ function httpGet(string $url, array $headers = [], int $timeoutSeconds = 6): arr
         CURLOPT_TIMEOUT => max(3, $timeoutSeconds),
         CURLOPT_HTTPHEADER => $normalizedHeaders,
     ]);
+    if (defined('CURL_IPRESOLVE_V4')) {
+        curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    }
 
     $result = curl_exec($ch);
     $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -1008,6 +1033,248 @@ function httpGet(string $url, array $headers = [], int $timeoutSeconds = 6): arr
     return ['ok' => $status >= 200 && $status < 300, 'status' => $status, 'body' => $body];
 }
 
+function telegramLogPath(): string
+{
+    $baseDir = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'logs';
+    if (!is_dir($baseDir)) {
+        @mkdir($baseDir, 0777, true);
+    }
+
+    return $baseDir . DIRECTORY_SEPARATOR . 'telegram_notify.log';
+}
+
+function logTelegramNotify(string $level, string $message, array $context = []): void
+{
+    $level = mb_strtoupper(trim($level));
+    if ($level === '') {
+        $level = 'INFO';
+    }
+
+    $line = '[' . nowDateTime() . '] [' . $level . '] ' . trim($message);
+    if ($context !== []) {
+        $json = json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (is_string($json) && $json !== '') {
+            $line .= ' ' . $json;
+        }
+    }
+
+    $line .= PHP_EOL;
+
+    @error_log($line, 3, telegramLogPath());
+}
+
+function telegramApiBaseUrls(): array
+{
+    $primary = trim(readEnvValue('TELEGRAM_API_BASE_URL', 'https://api.telegram.org'));
+    if ($primary === '') {
+        $primary = 'https://api.telegram.org';
+    }
+
+    $candidates = [
+        rtrim($primary, '/'),
+        'https://api.telegram.org',
+    ];
+
+    $normalized = [];
+    foreach ($candidates as $candidate) {
+        $candidate = trim((string)$candidate);
+        if ($candidate === '') {
+            continue;
+        }
+        $key = mb_strtolower($candidate);
+        $normalized[$key] = $candidate;
+    }
+
+    return array_values($normalized);
+}
+
+function shouldRetryTelegramInsecure(array $result): bool
+{
+    if (($result['ok'] ?? false) === true) {
+        return false;
+    }
+
+    $status = (int)($result['status'] ?? 0);
+    if ($status >= 200 && $status < 300) {
+        return false;
+    }
+
+    $raw = mb_strtolower(trim((string)($result['body'] ?? '')));
+    if ($raw === '') {
+        return $status === 0 || $status >= 500;
+    }
+
+    $keywords = [
+        'ssl',
+        'certificate',
+        'handshake',
+        'failed to enable crypto',
+        'operation timed out',
+        'timeout',
+        'connection refused',
+        'could not resolve',
+        'network is unreachable',
+    ];
+
+    foreach ($keywords as $keyword) {
+        if (str_contains($raw, $keyword)) {
+            return true;
+        }
+    }
+
+    return $status === 0 || $status >= 500;
+}
+
+function telegramHttpRequestUnsafe(string $method, string $url, array $payload = [], int $timeoutSeconds = 8): array
+{
+    $method = mb_strtoupper(trim($method));
+    if ($method === '') {
+        $method = 'GET';
+    }
+
+    $queryString = http_build_query($payload);
+
+    if (function_exists('curl_init')) {
+        $requestUrl = $url;
+        $isPost = $method === 'POST';
+        if (!$isPost && $queryString !== '') {
+            $requestUrl .= (str_contains($requestUrl, '?') ? '&' : '?') . $queryString;
+        }
+
+        $runCurlRequest = static function (string $targetUrl, bool $isPostMode, string $payloadBody, int $timeout, array $extraOpts = []): array {
+            $ch = curl_init($targetUrl);
+            if ($ch === false) {
+                return ['ok' => false, 'status' => 0, 'body' => 'Unable to initialize cURL'];
+            }
+
+            $opts = [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_CONNECTTIMEOUT => 4,
+                CURLOPT_TIMEOUT => max(4, $timeout),
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => 0,
+                CURLOPT_USERAGENT => 'OdyssiavaultTelegram/1.0',
+            ];
+            if ($isPostMode) {
+                $opts[CURLOPT_POST] = true;
+                $opts[CURLOPT_HTTPHEADER] = ['Content-Type: application/x-www-form-urlencoded'];
+                $opts[CURLOPT_POSTFIELDS] = $payloadBody;
+            }
+            if (defined('CURL_IPRESOLVE_V4')) {
+                $opts[CURLOPT_IPRESOLVE] = CURL_IPRESOLVE_V4;
+            }
+            foreach ($extraOpts as $key => $value) {
+                $opts[$key] = $value;
+            }
+
+            curl_setopt_array($ch, $opts);
+
+            $result = curl_exec($ch);
+            $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $errno = curl_errno($ch);
+            $error = curl_error($ch);
+            curl_close($ch);
+
+            if ($errno === 0 && is_string($result)) {
+                return ['ok' => $status >= 200 && $status < 300, 'status' => $status, 'body' => $result];
+            }
+
+            return ['ok' => false, 'status' => $status, 'body' => $error !== '' ? $error : 'Unsafe cURL request failed', 'errno' => $errno];
+        };
+
+        $first = $runCurlRequest($requestUrl, $isPost, $queryString, $timeoutSeconds);
+        if (($first['ok'] ?? false) === true) {
+            return $first;
+        }
+
+        $rawBody = mb_strtolower(trim((string)($first['body'] ?? '')));
+        $curlErrNo = (int)($first['errno'] ?? 0);
+        $host = mb_strtolower((string)(parse_url($url, PHP_URL_HOST) ?? ''));
+        if (($curlErrNo === 6 || str_contains($rawBody, 'could not resolve host')) && $host === 'api.telegram.org') {
+            $ipsRaw = trim(readEnvValue('TELEGRAM_API_IPS', '149.154.167.220,149.154.167.40,149.154.167.50'));
+            $ips = preg_split('/[\s,;]+/', $ipsRaw) ?: [];
+            $resolveTargets = [];
+            foreach ($ips as $ip) {
+                $ip = trim((string)$ip);
+                if ($ip === '') {
+                    continue;
+                }
+                if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+                    continue;
+                }
+                $resolveTargets[] = $ip;
+            }
+
+            foreach ($resolveTargets as $ip) {
+                $resolved = $runCurlRequest($requestUrl, $isPost, $queryString, $timeoutSeconds, [
+                    CURLOPT_RESOLVE => ['api.telegram.org:443:' . $ip],
+                ]);
+                if (($resolved['ok'] ?? false) === true) {
+                    logTelegramNotify('WARN', 'Telegram request succeeded via CURLOPT_RESOLVE fallback.', [
+                        'ip' => $ip,
+                        'url' => $requestUrl,
+                    ]);
+                    return $resolved;
+                }
+            }
+        }
+
+        return $first;
+    }
+
+    $requestUrl = $url;
+    $body = null;
+    if ($method === 'POST') {
+        $body = $queryString;
+    } elseif ($queryString !== '') {
+        $requestUrl .= (str_contains($requestUrl, '?') ? '&' : '?') . $queryString;
+    }
+
+    return httpRequestViaStream($method, $requestUrl, $body, [], max(4, $timeoutSeconds));
+}
+
+function telegramRequest(string $method, string $botToken, string $path, array $payload, int $timeoutSeconds = 8): array
+{
+    $lastResult = ['ok' => false, 'status' => 0, 'description' => 'Telegram request not started', 'body' => ''];
+    $method = mb_strtoupper(trim($method));
+    if ($method === '') {
+        $method = 'GET';
+    }
+
+    foreach (telegramApiBaseUrls() as $baseUrl) {
+        $url = rtrim($baseUrl, '/') . '/bot' . $botToken . '/' . ltrim($path, '/');
+        if ($method === 'POST') {
+            $result = parseTelegramApiResponse(httpPostUrlEncoded($url, $payload, [], $timeoutSeconds));
+        } else {
+            $queryUrl = $url . '?' . http_build_query($payload);
+            $result = parseTelegramApiResponse(httpGet($queryUrl, [], $timeoutSeconds));
+        }
+
+        if (($result['ok'] ?? false) === true) {
+            return $result;
+        }
+
+        $lastResult = $result;
+
+        if (shouldRetryTelegramInsecure($result)) {
+            $unsafeResult = parseTelegramApiResponse(telegramHttpRequestUnsafe($method, $url, $payload, $timeoutSeconds));
+            if (($unsafeResult['ok'] ?? false) === true) {
+                logTelegramNotify('WARN', 'Telegram request succeeded via unsafe fallback.', [
+                    'path' => $path,
+                    'base_url' => $baseUrl,
+                    'status' => (int)($unsafeResult['status'] ?? 0),
+                ]);
+                return $unsafeResult;
+            }
+
+            $lastResult = $unsafeResult;
+        }
+    }
+
+    return $lastResult;
+}
+
 function discoverTelegramChatIds(string $botToken, int $timeoutSeconds = 6): array
 {
     $botToken = trim($botToken);
@@ -1015,9 +1282,16 @@ function discoverTelegramChatIds(string $botToken, int $timeoutSeconds = 6): arr
         return [];
     }
 
-    $url = 'https://api.telegram.org/bot' . $botToken . '/getUpdates?limit=20&timeout=0';
-    $result = httpGet($url, [], $timeoutSeconds);
+    $result = telegramRequest('GET', $botToken, 'getUpdates', [
+        'limit' => 20,
+        'timeout' => 0,
+    ], $timeoutSeconds);
     if (!($result['ok'] ?? false)) {
+        logTelegramNotify('ERROR', 'discoverTelegramChatIds failed.', [
+            'status' => (int)($result['status'] ?? 0),
+            'description' => (string)($result['description'] ?? ''),
+            'body' => mb_substr(trim((string)($result['body'] ?? '')), 0, 220),
+        ]);
         return [];
     }
 
@@ -1291,26 +1565,23 @@ function parseTelegramApiResponse(array $result): array
 
 function sendTelegramMessage(string $botToken, string $chatId, string $message, bool $disablePreview, int $timeout): array
 {
-    $url = 'https://api.telegram.org/bot' . $botToken . '/sendMessage';
     $payload = [
         'chat_id' => $chatId,
         'text' => $message,
         'disable_web_page_preview' => $disablePreview ? 'true' : 'false',
     ];
-
-    $first = parseTelegramApiResponse(httpPostUrlEncoded($url, $payload, [], $timeout));
-    if ($first['ok']) {
-        return $first;
+    $result = telegramRequest('POST', $botToken, 'sendMessage', $payload, $timeout);
+    if (($result['ok'] ?? false) === true) {
+        return $result;
     }
 
     // Fallback GET: beberapa hosting gratis sering bermasalah pada body POST.
-    $queryUrl = $url . '?' . http_build_query($payload);
-    $second = parseTelegramApiResponse(httpGet($queryUrl, [], $timeout));
-    if ($second['ok']) {
-        return $second;
+    $fallback = telegramRequest('GET', $botToken, 'sendMessage', $payload, $timeout);
+    if (($fallback['ok'] ?? false) === true) {
+        return $fallback;
     }
 
-    return $first;
+    return $result;
 }
 
 function notifyAdminTelegramPendingPayment(array $config, array $context): void
@@ -1335,20 +1606,42 @@ function notifyAdminTelegramPendingPayment(array $config, array $context): void
             return;
         }
 
-        $timeoutRaw = envValueOrConfig('TELEGRAM_TIMEOUT', (string)($tg['timeout'] ?? '6'));
+        $timeoutRaw = envValueOrConfig('TELEGRAM_TIMEOUT', (string)($tg['timeout'] ?? '12'));
         $timeout = (int)$timeoutRaw;
         if ($timeout <= 0) {
+            $timeout = 12;
+        }
+        if ($timeout < 6) {
             $timeout = 6;
         }
 
         $chatIdsRaw = trim(envValueOrConfig('TELEGRAM_ADMIN_CHAT_ID', (string)($tg['chat_id'] ?? '')));
         $chatIds = normalizeTelegramChatIds($chatIdsRaw);
-        if ($chatIds === []) {
-            $chatIds = discoverTelegramChatIds($botToken, $timeout);
-            if ($chatIds === []) {
-                error_log('Telegram admin notify skipped: TELEGRAM_ADMIN_CHAT_ID kosong/invalid dan auto-detect belum menemukan chat.');
-                return;
+
+        $autoDiscoverRaw = readEnvValue('TELEGRAM_AUTO_DISCOVER_CHAT_IDS', '1');
+        $autoDiscover = parseLooseBool($autoDiscoverRaw, true);
+        if ($autoDiscover) {
+            $discoveredChatIds = discoverTelegramChatIds($botToken, $timeout);
+            if ($discoveredChatIds !== []) {
+                $merged = [];
+                foreach ($chatIds as $chatId) {
+                    $merged[(string)$chatId] = true;
+                }
+                foreach ($discoveredChatIds as $chatId) {
+                    $merged[(string)$chatId] = true;
+                }
+                $chatIds = array_values(array_map(static function ($value): string {
+                    return (string)$value;
+                }, array_keys($merged)));
             }
+        }
+
+        if ($chatIds === []) {
+            error_log('Telegram admin notify skipped: TELEGRAM_ADMIN_CHAT_ID kosong/invalid dan auto-detect belum menemukan chat.');
+            logTelegramNotify('ERROR', 'Telegram notify skipped: no valid chat id.', [
+                'order_id' => (int)($context['order_id'] ?? 0),
+            ]);
+            return;
         }
 
         $disablePreviewRaw = readEnvValue('TELEGRAM_DISABLE_WEB_PAGE_PREVIEW', '');
@@ -1379,10 +1672,22 @@ function notifyAdminTelegramPendingPayment(array $config, array $context): void
                     . ($description !== '' ? ' Desc: ' . $description : '')
                     . ($snippet !== '' ? ' Body: ' . $snippet : '')
                 );
+                logTelegramNotify('ERROR', 'Telegram notify failed.', [
+                    'chat_id' => $chatId,
+                    'status' => $status,
+                    'description' => $description,
+                    'body' => $snippet,
+                    'order_id' => (int)($context['order_id'] ?? 0),
+                ]);
                 continue;
             }
 
             $sent = true;
+            logTelegramNotify('INFO', 'Telegram notify delivered.', [
+                'chat_id' => $chatId,
+                'status' => (int)($result['status'] ?? 0),
+                'order_id' => (int)($context['order_id'] ?? 0),
+            ]);
         }
 
         // Jika semua chat_id gagal (umumnya chat_id salah / bot belum start),
@@ -1407,19 +1712,38 @@ function notifyAdminTelegramPendingPayment(array $config, array $context): void
                             . ($description !== '' ? ' Desc: ' . $description : '')
                             . ($snippet !== '' ? ' Body: ' . $snippet : '')
                         );
+                        logTelegramNotify('ERROR', 'Telegram notify fallback failed.', [
+                            'chat_id' => $chatId,
+                            'status' => $status,
+                            'description' => $description,
+                            'body' => $snippet,
+                            'order_id' => (int)($context['order_id'] ?? 0),
+                        ]);
                         continue;
                     }
 
                     $sent = true;
+                    logTelegramNotify('INFO', 'Telegram notify delivered via fallback chat discovery.', [
+                        'chat_id' => $chatId,
+                        'status' => (int)($result['status'] ?? 0),
+                        'order_id' => (int)($context['order_id'] ?? 0),
+                    ]);
                 }
             }
         }
 
         if (!$sent) {
             error_log('Telegram admin notify failed: no successful deliveries.');
+            logTelegramNotify('ERROR', 'Telegram admin notify failed: no successful deliveries.', [
+                'order_id' => (int)($context['order_id'] ?? 0),
+            ]);
         }
     } catch (Throwable $e) {
         error_log('Telegram admin notify error: ' . $e->getMessage());
+        logTelegramNotify('ERROR', 'Telegram admin notify exception.', [
+            'order_id' => (int)($context['order_id'] ?? 0),
+            'error' => $e->getMessage(),
+        ]);
     }
 }
 
@@ -1518,6 +1842,348 @@ function ensureTicketTables(PDO $pdo): bool
         error_log('Ensure ticket tables failed: ' . $e->getMessage());
         return false;
     }
+}
+
+function csChatCategoryBot(): string
+{
+    return 'Customer Service Chat BOT';
+}
+
+function csChatCategoryAdmin(): string
+{
+    return 'Customer Service Chat ADMIN';
+}
+
+function isCsChatCategory(string $category): bool
+{
+    $normalized = mb_strtolower(trim($category));
+    return str_starts_with($normalized, mb_strtolower('Customer Service Chat'));
+}
+
+function isCsBotMessage(string $message): bool
+{
+    return str_starts_with(trim($message), '[BOT]');
+}
+
+function withCsBotPrefix(string $message): string
+{
+    $clean = trim($message);
+    if ($clean === '') {
+        $clean = 'Pesan bot kosong.';
+    }
+    if (isCsBotMessage($clean)) {
+        return $clean;
+    }
+    return '[BOT] ' . $clean;
+}
+
+function resolveCsBotSenderId(PDO $pdo, int $fallbackUserId = 0): int
+{
+    try {
+        $stmt = $pdo->query("SELECT id FROM users WHERE role = 'admin' AND is_active = 1 ORDER BY id ASC LIMIT 1");
+        $id = (int)($stmt->fetchColumn() ?: 0);
+        if ($id > 0) {
+            return $id;
+        }
+    } catch (Throwable $e) {
+        // Ignore and continue fallback.
+    }
+
+    if ($fallbackUserId > 0) {
+        return $fallbackUserId;
+    }
+
+    try {
+        $stmt = $pdo->query('SELECT id FROM users ORDER BY id ASC LIMIT 1');
+        $id = (int)($stmt->fetchColumn() ?: 0);
+        if ($id > 0) {
+            return $id;
+        }
+    } catch (Throwable $e) {
+        // Ignore and continue fallback.
+    }
+
+    return 1;
+}
+
+function findActiveCsChatTicketForUser(PDO $pdo, int $userId): ?array
+{
+    if ($userId <= 0) {
+        return null;
+    }
+
+    $stmt = $pdo->prepare(
+        'SELECT id, user_id, subject, category, priority, status, last_message_at, created_at, updated_at
+         FROM tickets
+         WHERE user_id = :user_id
+           AND category LIKE :category_like
+           AND status <> :closed_status
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 1'
+    );
+    $stmt->execute([
+        'user_id' => $userId,
+        'category_like' => 'Customer Service Chat%',
+        'closed_status' => 'closed',
+    ]);
+    $ticket = $stmt->fetch();
+
+    return is_array($ticket) ? $ticket : null;
+}
+
+function loadCsChatMessages(PDO $pdo, int $ticketId, int $afterId = 0, int $limit = 120): array
+{
+    if ($ticketId <= 0) {
+        return [];
+    }
+
+    $limit = max(10, min(300, $limit));
+    $afterId = max(0, $afterId);
+
+    $stmt = $pdo->prepare(
+        'SELECT
+            tm.id,
+            tm.ticket_id,
+            tm.user_id,
+            tm.sender_role,
+            COALESCE(u.username, CONCAT("user#", tm.user_id)) AS username,
+            tm.message,
+            tm.created_at
+         FROM ticket_messages tm
+         LEFT JOIN users u ON u.id = tm.user_id
+         WHERE tm.ticket_id = :ticket_id
+           AND tm.id > :after_id
+         ORDER BY tm.id ASC
+         LIMIT :limit'
+    );
+    $stmt->bindValue(':ticket_id', $ticketId, PDO::PARAM_INT);
+    $stmt->bindValue(':after_id', $afterId, PDO::PARAM_INT);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+    $rows = $stmt->fetchAll();
+
+    return is_array($rows) ? $rows : [];
+}
+
+function resolveCsChatMode(PDO $pdo, array $ticket): string
+{
+    $status = mb_strtolower(trim((string)($ticket['status'] ?? 'open')));
+    if ($status === 'closed') {
+        return 'closed';
+    }
+
+    $category = (string)($ticket['category'] ?? '');
+    if (stripos($category, 'ADMIN') !== false) {
+        return 'admin';
+    }
+
+    $ticketId = (int)($ticket['id'] ?? 0);
+    if ($ticketId > 0) {
+        try {
+            $stmt = $pdo->prepare(
+                "SELECT COUNT(*)
+                 FROM ticket_messages
+                 WHERE ticket_id = :ticket_id
+                   AND sender_role = 'admin'
+                   AND message NOT LIKE '[BOT]%'"
+            );
+            $stmt->execute(['ticket_id' => $ticketId]);
+            $humanAdminReplies = (int)($stmt->fetchColumn() ?: 0);
+            if ($humanAdminReplies > 0) {
+                return 'admin';
+            }
+        } catch (Throwable $e) {
+            // Ignore fallback and continue BOT mode.
+        }
+    }
+
+    return 'bot';
+}
+
+function updateCsChatMode(PDO $pdo, int $ticketId, string $mode, string $updatedAt): void
+{
+    if ($ticketId <= 0) {
+        return;
+    }
+
+    $modeNormalized = mb_strtolower(trim($mode));
+    $category = $modeNormalized === 'admin' ? csChatCategoryAdmin() : csChatCategoryBot();
+
+    $stmt = $pdo->prepare(
+        'UPDATE tickets
+         SET category = :category, updated_at = :updated_at
+         WHERE id = :id'
+    );
+    $stmt->execute([
+        'category' => $category,
+        'updated_at' => $updatedAt,
+        'id' => $ticketId,
+    ]);
+}
+
+function createCsChatTicketForUser(PDO $pdo, array $user, array $config): array
+{
+    $userId = (int)($user['id'] ?? 0);
+    if ($userId <= 0) {
+        throw new RuntimeException('User ID tidak valid untuk membuat chat CS.');
+    }
+
+    $username = trim((string)($user['username'] ?? 'buyer'));
+    $now = nowDateTime();
+
+    $subject = 'Live Chat Customer Service';
+    if ($username !== '') {
+        $subject .= ' - @' . $username;
+    }
+
+    $insertTicketStmt = $pdo->prepare(
+        'INSERT INTO tickets (user_id, order_id, subject, category, priority, status, last_message_at, created_at, updated_at)
+         VALUES (:user_id, :order_id, :subject, :category, :priority, :status, :last_message_at, :created_at, :updated_at)'
+    );
+    $insertTicketStmt->execute([
+        'user_id' => $userId,
+        'order_id' => null,
+        'subject' => mb_substr($subject, 0, 180),
+        'category' => csChatCategoryBot(),
+        'priority' => 'normal',
+        'status' => 'open',
+        'last_message_at' => $now,
+        'created_at' => $now,
+        'updated_at' => $now,
+    ]);
+    $ticketId = (int)$pdo->lastInsertId();
+
+    $botSenderId = resolveCsBotSenderId($pdo, $userId);
+    $welcome = withCsBotPrefix(
+        'Halo, saya bot Customer Service Odyssiavault. '
+        . 'Saya bantu dulu ya. Kamu bisa tanya seputar order, pembayaran, refill, atau ketik "admin" untuk minta CS manusia.'
+    );
+
+    $insertMsgStmt = $pdo->prepare(
+        'INSERT INTO ticket_messages (ticket_id, user_id, sender_role, message, created_at)
+         VALUES (:ticket_id, :user_id, :sender_role, :message, :created_at)'
+    );
+    $insertMsgStmt->execute([
+        'ticket_id' => $ticketId,
+        'user_id' => $botSenderId,
+        'sender_role' => 'admin',
+        'message' => $welcome,
+        'created_at' => $now,
+    ]);
+
+    $selectStmt = $pdo->prepare(
+        'SELECT id, user_id, subject, category, priority, status, last_message_at, created_at, updated_at
+         FROM tickets
+         WHERE id = :id
+         LIMIT 1'
+    );
+    $selectStmt->execute(['id' => $ticketId]);
+    $ticket = $selectStmt->fetch();
+    if (!is_array($ticket)) {
+        throw new RuntimeException('Gagal mengambil data tiket CS yang baru dibuat.');
+    }
+
+    return $ticket;
+}
+
+function ensureCsChatTicketForUser(PDO $pdo, array $user, array $config): array
+{
+    $userId = (int)($user['id'] ?? 0);
+    if ($userId <= 0) {
+        throw new RuntimeException('User ID tidak valid.');
+    }
+
+    $ticket = findActiveCsChatTicketForUser($pdo, $userId);
+    if (is_array($ticket)) {
+        return $ticket;
+    }
+
+    return createCsChatTicketForUser($pdo, $user, $config);
+}
+
+function buildCsBotReply(string $message, array $user, array $config): array
+{
+    $raw = trim($message);
+    $text = mb_strtolower($raw);
+    $username = trim((string)($user['username'] ?? 'buyer'));
+    $greetName = $username !== '' ? '@' . $username : 'kamu';
+
+    $takeoverKeywords = [
+        'admin',
+        'cs manusia',
+        'operator',
+        'human',
+        'komplain',
+        'refund',
+        'lapor',
+        'error',
+        'gagal',
+        'belum masuk',
+        'tidak masuk',
+        'belum diproses',
+        'lama',
+    ];
+    $shouldTakeover = false;
+    foreach ($takeoverKeywords as $keyword) {
+        if (str_contains($text, $keyword)) {
+            $shouldTakeover = true;
+            break;
+        }
+    }
+
+    if ($shouldTakeover) {
+        return [
+            'reply' => 'Siap, saya teruskan ke admin ya. '
+                . 'Admin akan ambil alih chat ini dan balas secepatnya. '
+                . 'Sambil menunggu, kamu bisa tulis detail order/masalah biar proses lebih cepat.',
+            'takeover' => true,
+        ];
+    }
+
+    if ($text === '' || preg_match('/^(hai|halo|hallo|p|ping|assalamualaikum)/u', $text) === 1) {
+        return [
+            'reply' => 'Halo ' . $greetName . '! Saya bot CS Odyssiavault. '
+                . 'Kamu bisa tanya: status order, cara pembayaran, refill, atau ketik "admin" jika ingin dibantu CS manusia.',
+            'takeover' => false,
+        ];
+    }
+
+    if (str_contains($text, 'status') || str_contains($text, 'order')) {
+        return [
+            'reply' => 'Untuk cek status order: buka menu Pembelian > Riwayat, lalu cari ID order kamu. '
+                . 'Kalau status tidak berubah >24 jam, ketik "admin" biar langsung ditangani.',
+            'takeover' => false,
+        ];
+    }
+
+    if (str_contains($text, 'bayar') || str_contains($text, 'pembayaran') || str_contains($text, 'qris')) {
+        return [
+            'reply' => 'Alur pembayaran: checkout > scan QRIS > klik "Saya Sudah Bayar". '
+                . 'Setelah itu order masuk antrean verifikasi admin.',
+            'takeover' => false,
+        ];
+    }
+
+    if (str_contains($text, 'refill')) {
+        return [
+            'reply' => 'Untuk refill: buka menu Refill, masukkan ID order yang sudah selesai, lalu ajukan refill.',
+            'takeover' => false,
+        ];
+    }
+
+    if (str_contains($text, 'layanan') || str_contains($text, 'harga') || str_contains($text, 'service')) {
+        return [
+            'reply' => 'Kamu bisa lihat semua layanan di menu Pembelian atau Daftar Layanan. '
+                . 'Gunakan kolom search untuk cari berdasarkan nama atau ID layanan.',
+            'takeover' => false,
+        ];
+    }
+
+    return [
+        'reply' => 'Saya sudah terima pesan kamu. Kalau butuh bantuan cepat dari CS manusia, ketik "admin". '
+            . 'Kalau tidak, kamu juga bisa jelaskan lagi masalahnya dengan lebih detail.',
+        'takeover' => false,
+    ];
 }
 
 function insertBalanceTransaction(

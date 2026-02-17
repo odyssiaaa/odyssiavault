@@ -9,7 +9,7 @@ expireUnpaidOrders($pdo);
 
 $input = getRequestInput();
 $retryAfter = null;
-if (!rateLimitAllow('order_payment_confirm', 20, 60, $retryAfter)) {
+if (!rateLimitAllow('game_order_payment_confirm', 20, 60, $retryAfter)) {
     jsonResponse([
         'status' => false,
         'data' => ['msg' => 'Permintaan konfirmasi terlalu cepat. Coba lagi sebentar.'],
@@ -45,7 +45,12 @@ if ($selectedMethod === null) {
     ], 422);
 }
 
-$orderStmt = $pdo->prepare('SELECT id, user_id, status, payment_deadline_at, payment_confirmed_at, service_name, target, quantity, total_sell_price FROM orders WHERE id = :id AND user_id = :user_id LIMIT 1');
+$orderStmt = $pdo->prepare(
+    'SELECT id, user_id, status, payment_deadline_at, payment_confirmed_at, service_name, target, quantity, total_sell_price
+     FROM game_orders
+     WHERE id = :id AND user_id = :user_id
+     LIMIT 1'
+);
 $orderStmt->execute([
     'id' => $orderId,
     'user_id' => (int)$user['id'],
@@ -55,20 +60,20 @@ $order = $orderStmt->fetch();
 if (!is_array($order)) {
     jsonResponse([
         'status' => false,
-        'data' => ['msg' => 'Order tidak ditemukan.'],
+        'data' => ['msg' => 'Order game tidak ditemukan.'],
     ], 404);
 }
 
 if ((string)$order['status'] !== 'Menunggu Pembayaran') {
     jsonResponse([
         'status' => false,
-        'data' => ['msg' => 'Order ini tidak bisa dikonfirmasi pembayaran lagi.'],
+        'data' => ['msg' => 'Order game ini tidak bisa dikonfirmasi lagi.'],
     ], 422);
 }
 
 $deadline = trim((string)($order['payment_deadline_at'] ?? ''));
 if ($deadline !== '' && strtotime($deadline) !== false && strtotime($deadline) < time()) {
-    $cancelStmt = $pdo->prepare('UPDATE orders SET status = :status, error_message = :error_message, updated_at = :updated_at WHERE id = :id AND user_id = :user_id');
+    $cancelStmt = $pdo->prepare('UPDATE game_orders SET status = :status, error_message = :error_message, updated_at = :updated_at WHERE id = :id AND user_id = :user_id');
     $cancelStmt->execute([
         'status' => 'Dibatalkan',
         'error_message' => 'Batas waktu pembayaran habis',
@@ -79,12 +84,24 @@ if ($deadline !== '' && strtotime($deadline) !== false && strtotime($deadline) <
 
     jsonResponse([
         'status' => false,
-        'data' => ['msg' => 'Order sudah dibatalkan karena melewati batas waktu pembayaran.'],
+        'data' => ['msg' => 'Order game dibatalkan karena melewati batas waktu pembayaran.'],
     ], 422);
 }
 
-$updateStmt = $pdo->prepare('UPDATE orders SET payment_method = :payment_method, payment_channel_name = :payment_channel_name, payment_account_name = :payment_account_name, payment_account_number = :payment_account_number, payment_payer_name = :payment_payer_name, payment_reference = :payment_reference, payment_note = :payment_note, payment_confirmed_at = :payment_confirmed_at, updated_at = :updated_at WHERE id = :id AND user_id = :user_id');
 $now = nowDateTime();
+$updateStmt = $pdo->prepare(
+    'UPDATE game_orders
+     SET payment_method = :payment_method,
+         payment_channel_name = :payment_channel_name,
+         payment_account_name = :payment_account_name,
+         payment_account_number = :payment_account_number,
+         payment_payer_name = :payment_payer_name,
+         payment_reference = :payment_reference,
+         payment_note = :payment_note,
+         payment_confirmed_at = :payment_confirmed_at,
+         updated_at = :updated_at
+     WHERE id = :id AND user_id = :user_id'
+);
 $updateStmt->execute([
     'payment_method' => (string)$selectedMethod['code'],
     'payment_channel_name' => (string)$selectedMethod['name'],
@@ -99,29 +116,27 @@ $updateStmt->execute([
     'user_id' => (int)$user['id'],
 ]);
 
-$forceRenotify = parseLooseBool($input['renotify'] ?? true, true);
 $alreadyConfirmedBefore = trim((string)($order['payment_confirmed_at'] ?? '')) !== '';
-if ($forceRenotify || !$alreadyConfirmedBefore) {
-    notifyAdminPendingPaymentChannels($config, [
-        'order_id' => $orderId,
-        'username' => (string)($user['username'] ?? ''),
-        'service_name' => (string)($order['service_name'] ?? ''),
-        'target' => (string)($order['target'] ?? ''),
-        'quantity' => (int)($order['quantity'] ?? 0),
-        'total_sell_price' => (int)($order['total_sell_price'] ?? 0),
-        'payment_method_name' => (string)($selectedMethod['name'] ?? ''),
-        'payment_state' => $alreadyConfirmedBefore ? 'Sudah konfirmasi buyer (kirim ulang)' : 'Sudah konfirmasi buyer',
-        'payer_name' => $payerName,
-        'payment_reference' => $paymentReference,
-        'confirmed_at' => $now,
-    ]);
-}
+notifyAdminPendingPaymentChannels($config, [
+    'order_id' => $orderId,
+    'username' => (string)($user['username'] ?? ''),
+    'service_name' => '[GAME] ' . (string)($order['service_name'] ?? ''),
+    'target' => (string)($order['target'] ?? ''),
+    'quantity' => (int)($order['quantity'] ?? 1),
+    'total_sell_price' => (int)($order['total_sell_price'] ?? 0),
+    'payment_method_name' => (string)($selectedMethod['name'] ?? ''),
+    'payment_state' => $alreadyConfirmedBefore ? 'Sudah konfirmasi buyer (kirim ulang)' : 'Sudah konfirmasi buyer',
+    'payer_name' => $payerName,
+    'payment_reference' => $paymentReference,
+    'confirmed_at' => $now,
+]);
 
 jsonResponse([
     'status' => true,
     'data' => [
-        'msg' => 'Konfirmasi pembayaran berhasil dikirim. Order akan diproses setelah admin verifikasi.',
+        'msg' => 'Konfirmasi pembayaran game berhasil dikirim. Order akan diproses setelah admin verifikasi.',
         'order_id' => $orderId,
+        'order_type' => 'game',
         'status' => 'Menunggu Pembayaran',
         'payment' => [
             'method_code' => (string)$selectedMethod['code'],
@@ -133,3 +148,4 @@ jsonResponse([
         ],
     ],
 ]);
+

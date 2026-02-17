@@ -75,6 +75,17 @@ const state = {
     status: 'all',
     query: '',
   },
+  csChat: {
+    ticketId: 0,
+    mode: 'bot',
+    status: 'open',
+    messages: [],
+    lastMessageId: 0,
+    loaded: false,
+    unreadCount: 0,
+  },
+  adminCsChats: [],
+  adminCsChatsLoaded: false,
   history: {
     status: 'ALL',
     idQuery: '',
@@ -105,9 +116,25 @@ const state = {
     total_categories: 0,
     synced_at: '',
   },
+  gameServices: [],
+  gameServicesLoaded: false,
+  gameServicesRequestId: 0,
+  gameServiceSearchCache: new Map(),
+  gameSelectedService: null,
+  gameOrders: [],
+  gameOrdersLoaded: false,
+  gameOrdersRequestId: 0,
+  gameAdminPendingOrders: [],
+  gameAdminPendingLoaded: false,
+  gameAdminPendingRequestId: 0,
+  gameHistoryFilter: {
+    status: 'ALL',
+    idQuery: '',
+    serviceQuery: '',
+  },
   panelInfoClosed: false,
   hasTop5Data: false,
-  currentView: 'dashboard',
+  currentView: 'utama',
 };
 
 const NEWS_SOURCE_BRAND = 'Odyssiavault';
@@ -136,10 +163,15 @@ const IS_IOS_DEVICE = IOS_LIKE_USER_AGENT;
 const CATEGORY_OPTIONS_LIMIT = IS_IOS_DEVICE ? 90 : MAX_CATEGORY_OPTIONS;
 const SERVICE_OPTIONS_LIMIT = IS_IOS_DEVICE ? 100 : MAX_SERVICE_OPTIONS;
 const SERVICE_QUERY_MIN_CHARS = 1;
-const CATEGORY_INPUT_DEBOUNCE_MS = IS_IOS_DEVICE ? 240 : 140;
-const SERVICE_INPUT_DEBOUNCE_MS = IS_IOS_DEVICE ? 280 : 190;
+const GAME_QUERY_MIN_CHARS = 1;
+const GAME_SEARCH_DEBOUNCE_MS = IS_IOS_DEVICE ? 190 : 130;
+const GAME_SEARCH_CACHE_MAX_KEYS = 120;
+const CATEGORY_INPUT_DEBOUNCE_MS = IS_IOS_DEVICE ? 130 : 90;
+const SERVICE_INPUT_DEBOUNCE_MS = IS_IOS_DEVICE ? 170 : 110;
 const CATALOG_INPUT_DEBOUNCE_MS = IS_IOS_DEVICE ? 340 : 240;
 const ADMIN_HISTORY_INPUT_DEBOUNCE_MS = IS_IOS_DEVICE ? 360 : 240;
+const CS_CHAT_POLL_MS = IS_IOS_DEVICE ? 9000 : 7000;
+const CS_CHAT_ADMIN_POLL_MS = IS_IOS_DEVICE ? 16000 : 12000;
 const ID_NUMBER_FORMATTER = new Intl.NumberFormat('id-ID');
 const CURRENCY_FORMATTER = new Intl.NumberFormat('id-ID', {
   style: 'currency',
@@ -166,24 +198,40 @@ let adminToastContainerEl = null;
 let serviceInfoRafId = 0;
 let categorySuggestionItems = [];
 let serviceSuggestionItems = [];
+let gameServiceSuggestionItems = [];
 let categorySuggestRenderKey = '';
 let serviceSuggestRenderKey = '';
+let gameSuggestRenderKey = '';
+let csChatPollTimer = null;
+let csChatAdminPollTimer = null;
+let csChatRequestInFlight = false;
+let csChatAdminRequestInFlight = false;
 
 const pageEl = document.querySelector('.page');
+const PAYMENT_GATEWAY_ENABLED = String(pageEl?.dataset?.paymentGatewayEnabled || '').trim() === '1';
+const PAYMENT_GATEWAY_PROVIDER = String(pageEl?.dataset?.paymentGatewayProvider || 'custom').trim().toLowerCase();
+const GAME_TOPUP_COMING_SOON = String(pageEl?.dataset?.gameTopupComingSoon || '').trim() === '1';
 if (typeof document !== 'undefined') {
   document.documentElement.classList.toggle('ios-device', IS_IOS_DEVICE);
   if (document.body) {
     document.body.classList.toggle('ios-device', IS_IOS_DEVICE);
   }
 }
-const PANEL_VIEWS = new Set(['dashboard', 'profile', 'top5', 'purchase', 'refill', 'deposit', 'ticket', 'services', 'pages', 'admin']);
+const PANEL_VIEWS = new Set(['utama', 'dashboard', 'profile', 'top5', 'purchase', 'refill', 'game', 'deposit', 'ticket', 'services', 'pages', 'admin']);
 const LEGACY_VIEW_MAP = {
+  home: 'utama',
+  beranda: 'utama',
+  main: 'utama',
+  mainpage: 'utama',
+  landing: 'utama',
+  utama: 'utama',
   dashboardsection: 'dashboard',
   profilesection: 'profile',
   top5section: 'top5',
   ordersection: 'purchase',
   historysection: 'purchase',
   refillsection: 'refill',
+  gamesection: 'game',
   depositsection: 'deposit',
   ticketsection: 'ticket',
   servicessection: 'services',
@@ -197,6 +245,7 @@ const panelNavLinks = Array.from(document.querySelectorAll('.menu a[data-view]')
 const adminMenuLinkEl = document.getElementById('adminMenuLink');
 const viewSections = Array.from(document.querySelectorAll('[data-view-section]'));
 const sideTipsEls = Array.from(document.querySelectorAll('.tip'));
+const topbarTitleEl = document.getElementById('topbarTitle');
 
 const tabLogin = document.getElementById('tabLogin');
 const tabRegister = document.getElementById('tabRegister');
@@ -259,6 +308,26 @@ const top5SectionEl = document.getElementById('top5Section');
 const top5ListEl = document.getElementById('top5List');
 const top5EmptyStateEl = document.getElementById('top5EmptyState');
 const emergencyServiceTextEl = document.getElementById('emergencyServiceText');
+const gameOrderFormEl = document.getElementById('gameOrderForm');
+const gameCategorySelectEl = document.getElementById('gameCategorySelect');
+const gameServiceInputEl = document.getElementById('gameServiceInput');
+const gameServiceSuggestPanelEl = document.getElementById('gameServiceSuggestPanel');
+const gameSuggestFieldEl = gameServiceInputEl ? gameServiceInputEl.closest('.suggestion-field') : null;
+const gameTargetInputEl = document.getElementById('gameTargetInput');
+const gameContactInputEl = document.getElementById('gameContactInput');
+const gamePriceViewEl = document.getElementById('gamePriceView');
+const gameServiceInfoEl = document.getElementById('gameServiceInfo');
+const gameOrderNoticeEl = document.getElementById('gameOrderNotice');
+const gameOrdersBodyEl = document.getElementById('gameOrdersBody');
+const gameOrderNoticeBottomEl = document.getElementById('gameOrderNoticeBottom');
+const gameHistorySummaryEl = document.getElementById('gameHistorySummary');
+const gameHistoryStatusEl = document.getElementById('gameHistoryStatus');
+const gameHistoryIdSearchEl = document.getElementById('gameHistoryIdSearch');
+const gameHistoryServiceSearchEl = document.getElementById('gameHistoryServiceSearch');
+const gameHistoryRefreshBtnEl = document.getElementById('gameHistoryRefreshBtn');
+const gameAdminPendingPanelEl = document.getElementById('gameAdminPendingPanel');
+const gameAdminPendingBodyEl = document.getElementById('gameAdminPendingBody');
+const gameAdminPendingNoticeEl = document.getElementById('gameAdminPendingNotice');
 
 const newsListEl = document.getElementById('newsList');
 const newsAdminSectionEl = document.getElementById('newsAdminSection');
@@ -292,6 +361,7 @@ const paymentQrNoticeEl = document.getElementById('paymentQrNotice');
 const paymentQrConfirmBtnEl = document.getElementById('paymentQrConfirmBtn');
 const paymentQrToHistoryEl = document.getElementById('paymentQrToHistory');
 const historySectionEl = document.getElementById('historySection');
+const gameSectionEl = document.getElementById('gameSection');
 
 const ordersBody = document.getElementById('ordersBody');
 const ordersNotice = document.getElementById('ordersNotice');
@@ -332,6 +402,10 @@ const adminOrderHistorySummaryEl = document.getElementById('adminOrderHistorySum
 const adminOrderHistoryBodyEl = document.getElementById('adminOrderHistoryBody');
 const adminOrderHistoryPaginationEl = document.getElementById('adminOrderHistoryPagination');
 const adminOrderHistoryNoticeEl = document.getElementById('adminOrderHistoryNotice');
+const adminCsSectionEl = document.getElementById('adminCsSection');
+const adminCsBodyEl = document.getElementById('adminCsBody');
+const adminCsNoticeEl = document.getElementById('adminCsNotice');
+const adminCsRefreshBtnEl = document.getElementById('adminCsRefreshBtn');
 
 const depositFormEl = document.getElementById('depositForm');
 const depositAmountEl = document.getElementById('depositAmount');
@@ -396,6 +470,18 @@ const shareCopyBtnEl = document.getElementById('shareCopyBtn');
 const shareWebsiteUrlEl = document.getElementById('shareWebsiteUrl');
 const shareNoticeEl = document.getElementById('shareNotice');
 const shareProviderButtons = Array.from(document.querySelectorAll('[data-share-provider]'));
+const csChatWidgetEl = document.getElementById('csChatWidget');
+const csChatToggleEl = document.getElementById('csChatToggle');
+const csChatPanelEl = document.getElementById('csChatPanel');
+const csChatUnreadEl = document.getElementById('csChatUnread');
+const csChatModeTextEl = document.getElementById('csChatModeText');
+const csChatTakeoverBtnEl = document.getElementById('csChatTakeoverBtn');
+const csChatCloseBtnEl = document.getElementById('csChatCloseBtn');
+const csChatMessagesEl = document.getElementById('csChatMessages');
+const csChatNoticeEl = document.getElementById('csChatNotice');
+const csChatFormEl = document.getElementById('csChatForm');
+const csChatInputEl = document.getElementById('csChatInput');
+const csChatSendBtnEl = document.getElementById('csChatSendBtn');
 
 function rupiah(value) {
   return CURRENCY_FORMATTER.format(Number(value || 0));
@@ -803,6 +889,29 @@ function isMobileSuggestionViewport() {
   return IS_IOS_DEVICE || window.matchMedia('(max-width: 860px)').matches;
 }
 
+function shouldAutoScrollSuggestionInput(inputEl) {
+  if (!(inputEl instanceof HTMLElement) || !isMobileSuggestionViewport()) {
+    return false;
+  }
+
+  const rect = inputEl.getBoundingClientRect();
+  const visualViewport = typeof window !== 'undefined' ? window.visualViewport : null;
+  const viewportHeight = Number(
+    visualViewport?.height
+    || window.innerHeight
+    || document.documentElement?.clientHeight
+    || 0
+  );
+  if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) {
+    return false;
+  }
+
+  const safeTop = Number(visualViewport?.offsetTop || 0) + 8;
+  const preferredBottom = viewportHeight * 0.72;
+
+  return rect.top < safeTop || rect.bottom > preferredBottom;
+}
+
 function hideCategorySuggestions(clearItems = false) {
   if (categorySuggestPanelEl) {
     categorySuggestPanelEl.classList.add('hidden');
@@ -833,9 +942,25 @@ function hideServiceSuggestions(clearItems = false) {
   }
 }
 
+function hideGameServiceSuggestions(clearItems = false) {
+  if (gameServiceSuggestPanelEl) {
+    gameServiceSuggestPanelEl.classList.add('hidden');
+    gameServiceSuggestPanelEl.removeAttribute('data-mobile');
+    clearSuggestionPanelPosition(gameServiceSuggestPanelEl);
+  }
+  if (clearItems) {
+    gameServiceSuggestionItems = [];
+    gameSuggestRenderKey = '';
+    if (gameServiceSuggestPanelEl) {
+      gameServiceSuggestPanelEl.innerHTML = '';
+    }
+  }
+}
+
 function hideAllSuggestions(clearItems = false) {
   hideCategorySuggestions(clearItems);
   hideServiceSuggestions(clearItems);
+  hideGameServiceSuggestions(clearItems);
 }
 
 function isSuggestionInteractiveTarget(target) {
@@ -843,11 +968,19 @@ function isSuggestionInteractiveTarget(target) {
     return false;
   }
 
-  if (categorySuggestFieldEl?.contains(target) || serviceSuggestFieldEl?.contains(target)) {
+  if (categorySuggestFieldEl?.contains(target) || serviceSuggestFieldEl?.contains(target) || gameSuggestFieldEl?.contains(target)) {
     return true;
   }
 
-  if (categorySuggestPanelEl?.contains(target) || serviceSuggestPanelEl?.contains(target)) {
+  if (
+    categorySuggestPanelEl?.contains(target)
+    || serviceSuggestPanelEl?.contains(target)
+    || gameServiceSuggestPanelEl?.contains(target)
+  ) {
+    return true;
+  }
+
+  if (gameServiceInputEl?.contains?.(target)) {
     return true;
   }
 
@@ -860,9 +993,11 @@ function keepSuggestionInputVisible(inputEl) {
   }
 
   setTimeout(() => {
-    scrollElementIntoView(inputEl, 'start');
+    if (shouldAutoScrollSuggestionInput(inputEl)) {
+      scrollElementIntoView(inputEl, 'center');
+    }
     refreshOpenSuggestionPanelPosition();
-  }, 60);
+  }, IS_IOS_DEVICE ? 110 : 70);
 }
 
 function clearSuggestionPanelPosition(panelEl) {
@@ -919,6 +1054,17 @@ function refreshOpenSuggestionPanelPosition() {
   if (serviceSuggestPanelEl && !serviceSuggestPanelEl.classList.contains('hidden')) {
     positionSuggestionPanel(serviceSuggestPanelEl, serviceInputEl);
   }
+
+  if (gameServiceSuggestPanelEl && !gameServiceSuggestPanelEl.classList.contains('hidden')) {
+    positionSuggestionPanel(gameServiceSuggestPanelEl, gameServiceInputEl);
+  }
+}
+
+function hasOpenSuggestionPanel() {
+  const categoryOpen = !!(categorySuggestPanelEl && !categorySuggestPanelEl.classList.contains('hidden'));
+  const serviceOpen = !!(serviceSuggestPanelEl && !serviceSuggestPanelEl.classList.contains('hidden'));
+  const gameOpen = !!(gameServiceSuggestPanelEl && !gameServiceSuggestPanelEl.classList.contains('hidden'));
+  return categoryOpen || serviceOpen || gameOpen;
 }
 
 function renderCategorySuggestions(categories, rawInput = '') {
@@ -1010,6 +1156,31 @@ function renderServiceSuggestions(services, rawInput = '') {
   serviceSuggestRenderKey = renderKey;
 }
 
+function handleSuggestPanelClick(event, kind) {
+  const target = event?.target;
+  if (!(target instanceof Element)) return false;
+
+  const optionEl = target.closest(`[data-suggest-kind="${kind}"]`);
+  if (!optionEl) return false;
+
+  const index = Number(optionEl.dataset.suggestIndex || -1);
+  if (index < 0) return false;
+
+  event.stopPropagation();
+
+  if (kind === 'category') {
+    applyCategorySuggestion(index);
+  } else if (kind === 'service') {
+    applyServiceSuggestion(index);
+  } else if (kind === 'game-service') {
+    applyGameServiceSuggestion(index);
+  } else {
+    return false;
+  }
+
+  return true;
+}
+
 function applyCategorySuggestion(index) {
   if (!categoryInputEl) {
     return;
@@ -1062,6 +1233,26 @@ function applyServiceSuggestion(index) {
   scheduleServiceInfoUpdate();
 }
 
+function applyGameServiceSuggestion(index) {
+  if (!gameServiceInputEl) {
+    return;
+  }
+
+  const service = gameServiceSuggestionItems[index];
+  if (!service || typeof service !== 'object') {
+    return;
+  }
+
+  applySelectedGameService(service);
+  hideGameServiceSuggestions();
+
+  try {
+    gameServiceInputEl.blur();
+  } catch {
+    // Ignore blur errors in old browsers.
+  }
+}
+
 function scheduleServiceInfoUpdate() {
   if (serviceInfoRafId) {
     return;
@@ -1085,7 +1276,7 @@ function scrollElementIntoView(el, block = 'start') {
     return;
   }
 
-  const behavior = IS_IOS_DEVICE ? 'auto' : 'smooth';
+  const behavior = (IS_IOS_DEVICE || isMobileSuggestionViewport()) ? 'auto' : 'smooth';
   try {
     el.scrollIntoView({ behavior, block });
   } catch {
@@ -1325,6 +1516,10 @@ function stopAdminPendingPoller() {
   adminSeenPendingOrderIds = new Set();
 }
 
+function isPakasirGatewayAutomationEnabled() {
+  return PAYMENT_GATEWAY_ENABLED && PAYMENT_GATEWAY_PROVIDER === 'pakasir';
+}
+
 function stopPendingPaymentSyncPoller() {
   if (pendingPaymentSyncTimer) {
     clearInterval(pendingPaymentSyncTimer);
@@ -1366,6 +1561,8 @@ function collectPendingSyncOrderIds(isAdmin) {
 }
 
 async function syncPendingPaymentOrders(options = {}) {
+  if (!isPakasirGatewayAutomationEnabled()) return;
+
   const silent = !!options.silent;
   const detectProgress = !!options.detectProgress;
   if (!state.user) return;
@@ -1454,6 +1651,11 @@ async function syncPendingPaymentOrders(options = {}) {
 }
 
 function startPendingPaymentSyncPoller() {
+  if (!isPakasirGatewayAutomationEnabled()) {
+    stopPendingPaymentSyncPoller();
+    return;
+  }
+
   if (!state.user) {
     stopPendingPaymentSyncPoller();
     return;
@@ -1688,7 +1890,27 @@ function buildServiceDirectory(categories) {
 function normalizePanelView(value) {
   const normalized = String(value || '').trim().toLowerCase();
   const mapped = LEGACY_VIEW_MAP[normalized] || normalized;
-  return PANEL_VIEWS.has(mapped) ? mapped : 'dashboard';
+  return PANEL_VIEWS.has(mapped) ? mapped : 'utama';
+}
+
+function topbarTitleByView(view) {
+  const normalized = normalizePanelView(view);
+  const map = {
+    utama: 'Halaman Utama Odyssiavault',
+    dashboard: 'Dashboard Odyssiavault',
+    profile: 'Profil Akun',
+    top5: 'Top 5 Layanan',
+    purchase: 'Buat Pesanan',
+    refill: 'Refill Pesanan',
+    game: 'Topup Game',
+    deposit: 'Deposit',
+    ticket: 'Tiket Bantuan',
+    services: 'Daftar Layanan',
+    pages: 'Halaman Informasi',
+    admin: 'Admin Panel',
+  };
+
+  return map[normalized] || 'Odyssiavault';
 }
 
 function updateUrlForView(view) {
@@ -2054,9 +2276,12 @@ function switchAuthTab(tab) {
 function setViewLoggedIn(isLoggedIn) {
   if (authView) authView.classList.toggle('hidden', isLoggedIn);
   if (appView) appView.classList.toggle('hidden', !isLoggedIn);
+  updateCsChatWidgetVisibility();
   if (!isLoggedIn) {
     closeAccountMenu();
     hideAllSuggestions(true);
+    stopCsChatPoller();
+    stopCsChatAdminPoller();
   }
 }
 
@@ -2083,7 +2308,7 @@ function syncTop5Visibility() {
 function applyPanelView(view) {
   const isAdmin = String(state.user?.role || '') === 'admin';
   const requestedView = normalizePanelView(view);
-  const resolvedView = (!isAdmin && requestedView === 'admin') ? 'dashboard' : requestedView;
+  const resolvedView = (!isAdmin && requestedView === 'admin') ? 'utama' : requestedView;
   closeAccountMenu();
   hideAllSuggestions();
 
@@ -2117,6 +2342,12 @@ function applyPanelView(view) {
   if (!isAdmin && newsAdminSectionEl) {
     newsAdminSectionEl.classList.add('hidden');
   }
+
+  if (topbarTitleEl) {
+    topbarTitleEl.textContent = topbarTitleByView(state.currentView);
+  }
+
+  updateHeaderStats();
 }
 
 function updateHeaderStats() {
@@ -2137,8 +2368,13 @@ function updateHeaderStats() {
   }
 
   const displayName = state.user.username || 'buyer';
+  const currentView = normalizePanelView(state.currentView);
   if (welcomeText) {
-    welcomeText.textContent = `Halo @${displayName}. Pilih layanan, checkout, bayar langsung, lalu konfirmasi pembayaran.`;
+    if (currentView === 'utama') {
+      welcomeText.textContent = `Halo @${displayName}. Pilih dulu jalur belanja kamu: SSM atau Topup Game.`;
+    } else {
+      welcomeText.textContent = `Halo @${displayName}. Pilih layanan, checkout, bayar langsung, lalu konfirmasi pembayaran.`;
+    }
   }
   if (statBalance) {
     statBalance.textContent = String(state.stats.waiting_orders || 0);
@@ -2305,10 +2541,18 @@ async function fetchSession(options = {}) {
       updateAdminMenuLabel();
       startAdminPendingPoller();
       startPendingPaymentSyncPoller();
+      startCsChatPoller();
+      startCsChatAdminPoller();
       updateHeaderStats();
       updateAccountMenu();
       updateProfilePanel();
       setViewLoggedIn(true);
+      ensureCsChatBootstrap({ force: false, silent: true }).catch(() => {
+        // Ignore CS bootstrap failure here; widget can retry on open.
+      });
+      loadAdminCsChats({ force: false, silent: true }).catch(() => {
+        // Ignore CS admin list bootstrap failure here.
+      });
       return true;
     }
 
@@ -2328,6 +2572,8 @@ async function fetchSession(options = {}) {
 
   stopAdminPendingPoller();
   stopPendingPaymentSyncPoller();
+  stopCsChatPoller();
+  stopCsChatAdminPoller();
   state.user = null;
   state.stats = { total_orders: 0, total_spent: 0 };
   state.adminPaymentOrders = [];
@@ -2343,10 +2589,15 @@ async function fetchSession(options = {}) {
     total: 0,
     totalPages: 1,
   };
+  resetCsChatState();
+  state.adminCsChats = [];
+  state.adminCsChatsLoaded = false;
   updateHeaderStats();
   updateAccountMenu();
   updateProfilePanel();
   renderAdminOrderHistory();
+  renderCsChat();
+  renderAdminCsChats();
   updateAdminMenuLabel();
   setViewLoggedIn(false);
   return false;
@@ -2685,6 +2936,7 @@ function hideCheckoutPanel() {
 function renderCheckoutPanel(orderData) {
   if (!checkoutPanelEl || !checkoutSummaryEl) return;
 
+  const orderType = String(orderData?.order_type || orderData?.type || 'ssm').toLowerCase() === 'game' ? 'game' : 'ssm';
   const gateway = orderData?.payment_gateway && typeof orderData.payment_gateway === 'object'
     ? orderData.payment_gateway
     : null;
@@ -2694,20 +2946,26 @@ function renderCheckoutPanel(orderData) {
     : state.paymentMethods;
   state.paymentMethods = methods;
   state.lastCheckout = {
+    order_type: orderType,
     order_id: Number(orderData?.order_id || 0),
     payment_deadline_at: orderData?.payment_deadline_at || '',
     total_sell_price: Number(orderData?.total_sell_price || 0),
     payment_gateway: gateway,
   };
 
+  const serviceName = String(orderData?.service?.name || orderData?.service_name || '-');
+  const targetValue = String(orderData?.target || orderData?.data || '-');
+  const quantityValue = Number(orderData?.quantity || 0);
+
   const displayTotal = Number(gateway?.total_payment || orderData?.total_sell_price || 0);
   const gatewayFee = Number(gateway?.fee || 0);
 
   const summaryLines = [
     `Order ID: #${orderData?.order_id || '-'}`,
-    `Layanan: ${orderData?.service?.name || '-'}`,
-    `Target: ${orderData?.target || '-'}`,
-    `Jumlah: ${formatInteger(orderData?.quantity || 0)}`,
+    `Jenis: ${orderType === 'game' ? 'Topup Game' : 'SSM Panel'}`,
+    `Layanan: ${serviceName}`,
+    `Target: ${targetValue}`,
+    `Jumlah: ${formatInteger(quantityValue)}`,
     `Total Pembayaran: ${rupiah(displayTotal)}`,
     `Batas Pembayaran: ${formatDateTime(gateway?.expired_at || orderData?.payment_deadline_at || '')}`,
   ];
@@ -3183,6 +3441,9 @@ async function replyTicket() {
     loadTickets({ force: true }),
     loadTicketDetail(ticketId),
   ]);
+  if (String(state.user?.role || '') === 'admin') {
+    await loadAdminCsChats({ force: true, silent: true });
+  }
 }
 
 async function updateTicketStatus(action) {
@@ -3217,6 +3478,506 @@ async function updateTicketStatus(action) {
     loadTickets({ force: true }),
     loadTicketDetail(ticketId),
   ]);
+}
+
+function csChatModeLabel(mode) {
+  const normalized = String(mode || '').toLowerCase();
+  if (normalized === 'admin') return 'Admin aktif';
+  if (normalized === 'closed') return 'Chat ditutup';
+  return 'Bot aktif';
+}
+
+function isCsChatPanelOpen() {
+  return !!csChatPanelEl && !csChatPanelEl.classList.contains('hidden');
+}
+
+function updateCsChatUnreadBadge() {
+  if (!csChatUnreadEl) return;
+  const count = Math.max(0, Number(state.csChat?.unreadCount || 0));
+  csChatUnreadEl.textContent = count > 99 ? '99+' : String(count);
+  csChatUnreadEl.classList.toggle('hidden', count <= 0);
+}
+
+function updateCsChatWidgetVisibility() {
+  const loggedIn = !!state.user;
+  if (csChatWidgetEl) {
+    csChatWidgetEl.classList.toggle('hidden', !loggedIn);
+  }
+  if (!loggedIn) {
+    setCsChatPanelOpen(false);
+  }
+}
+
+function setCsChatPanelOpen(open) {
+  const canOpen = !!open && !!state.user;
+  if (csChatPanelEl) {
+    csChatPanelEl.classList.toggle('hidden', !canOpen);
+  }
+  if (csChatToggleEl) {
+    csChatToggleEl.setAttribute('aria-expanded', canOpen ? 'true' : 'false');
+  }
+  if (canOpen) {
+    state.csChat.unreadCount = 0;
+    updateCsChatUnreadBadge();
+    hideNotice(csChatNoticeEl);
+    if (csChatInputEl) {
+      setTimeout(() => {
+        try {
+          csChatInputEl.focus({ preventScroll: true });
+        } catch {
+          csChatInputEl.focus();
+        }
+      }, 80);
+    }
+  }
+}
+
+function resetCsChatState() {
+  state.csChat = {
+    ticketId: 0,
+    mode: 'bot',
+    status: 'open',
+    messages: [],
+    lastMessageId: 0,
+    loaded: false,
+    unreadCount: 0,
+  };
+  updateCsChatUnreadBadge();
+}
+
+function renderCsChatMessages() {
+  if (!csChatMessagesEl) return;
+  const rows = Array.isArray(state.csChat?.messages) ? state.csChat.messages : [];
+  if (!rows.length) {
+    csChatMessagesEl.innerHTML = '<div class="box" style="margin:0;">Mulai percakapan dengan customer service.</div>';
+    return;
+  }
+
+  csChatMessagesEl.innerHTML = rows.map((item) => {
+    const senderRole = String(item.sender_role || 'user').toLowerCase();
+    const rawMessage = String(item.message || '').trim();
+    const isBot = senderRole === 'admin' && rawMessage.startsWith('[BOT]');
+    const message = isBot ? rawMessage.replace(/^\[BOT\]\s*/i, '') : rawMessage;
+    const isSelf = senderRole === 'user' && Number(item.user_id || 0) === Number(state.user?.id || 0);
+    const cssClass = [
+      'cs-chat-msg',
+      isSelf ? 'self' : '',
+      isBot ? 'bot' : '',
+    ].filter(Boolean).join(' ');
+    const senderLabel = isSelf
+      ? 'Kamu'
+      : (isBot ? 'Bot CS' : (senderRole === 'admin' ? 'Admin' : (item.username ? `@${item.username}` : 'Buyer')));
+
+    return `
+      <article class="${cssClass}">
+        <div class="cs-chat-meta">
+          <strong>${escapeHtml(senderLabel)}</strong>
+          <span>${escapeHtml(formatDateTime(item.created_at || ''))}</span>
+        </div>
+        <div class="cs-chat-body">${escapeHtml(message || '-')}</div>
+      </article>
+    `;
+  }).join('');
+
+  if (isCsChatPanelOpen()) {
+    csChatMessagesEl.scrollTop = csChatMessagesEl.scrollHeight;
+  }
+}
+
+function renderCsChat() {
+  if (csChatModeTextEl) {
+    csChatModeTextEl.textContent = csChatModeLabel(state.csChat?.mode || 'bot');
+  }
+
+  const canTakeover = String(state.user?.role || '') === 'admin'
+    && Number(state.csChat?.ticketId || 0) > 0
+    && String(state.csChat?.mode || '').toLowerCase() !== 'admin';
+  if (csChatTakeoverBtnEl) {
+    csChatTakeoverBtnEl.classList.toggle('hidden', !canTakeover);
+  }
+
+  renderCsChatMessages();
+  updateCsChatUnreadBadge();
+  updateCsChatWidgetVisibility();
+}
+
+async function ensureCsChatBootstrap(options = {}) {
+  if (!state.user) return false;
+  const force = !!options.force;
+  const silent = !!options.silent;
+
+  if (!force && state.csChat.loaded && Number(state.csChat.ticketId || 0) > 0) {
+    renderCsChat();
+    return true;
+  }
+
+  if (csChatRequestInFlight) {
+    return false;
+  }
+
+  csChatRequestInFlight = true;
+  if (!silent && isCsChatPanelOpen()) {
+    showNotice(csChatNoticeEl, 'info', 'Memuat chat customer service...');
+  }
+
+  try {
+    const endpoint = force
+      ? `./api/cs_chat_bootstrap.php?_t=${Date.now()}`
+      : './api/cs_chat_bootstrap.php';
+    const { data } = await apiRequest(endpoint, {
+      forceRefresh: force,
+      cacheTtlMs: 1000,
+    });
+
+    if (!data?.status) {
+      if (!silent) {
+        showNotice(csChatNoticeEl, 'err', data?.data?.msg || 'Gagal memuat chat customer service.');
+      }
+      return false;
+    }
+
+    const payload = data.data || {};
+    const ticket = payload.ticket || {};
+    const messages = Array.isArray(payload.messages) ? payload.messages : [];
+
+    state.csChat.ticketId = Number(ticket.id || 0);
+    state.csChat.mode = String(payload.mode || 'bot').toLowerCase();
+    state.csChat.status = String(ticket.status || 'open').toLowerCase();
+    state.csChat.messages = messages;
+    state.csChat.lastMessageId = Math.max(
+      0,
+      Number(payload.last_message_id || 0),
+      ...messages.map((item) => Number(item?.id || 0))
+    );
+    state.csChat.loaded = true;
+    state.csChat.unreadCount = 0;
+
+    hideNotice(csChatNoticeEl);
+    renderCsChat();
+    return true;
+  } catch (error) {
+    if (!silent) {
+      showNotice(csChatNoticeEl, 'err', error.message || 'Gagal memuat chat customer service.');
+    }
+    return false;
+  } finally {
+    csChatRequestInFlight = false;
+  }
+}
+
+function mergeCsChatMessages(incomingMessages) {
+  const incoming = Array.isArray(incomingMessages) ? incomingMessages : [];
+  if (!incoming.length) {
+    return;
+  }
+
+  const byId = new Map();
+  const merged = [];
+
+  const appendRow = (row) => {
+    const rowId = Number(row?.id || 0);
+    if (rowId <= 0) return;
+    if (byId.has(rowId)) return;
+    byId.set(rowId, true);
+    merged.push(row);
+  };
+
+  (Array.isArray(state.csChat.messages) ? state.csChat.messages : []).forEach(appendRow);
+  incoming.forEach(appendRow);
+  merged.sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
+
+  state.csChat.messages = merged;
+  state.csChat.lastMessageId = Math.max(
+    Number(state.csChat.lastMessageId || 0),
+    ...incoming.map((row) => Number(row?.id || 0))
+  );
+}
+
+async function pollCsChat(options = {}) {
+  if (!state.user) return;
+  if (csChatRequestInFlight) return;
+
+  const force = !!options.force;
+  if (!state.csChat.loaded || Number(state.csChat.ticketId || 0) <= 0) {
+    const ready = await ensureCsChatBootstrap({ force: false, silent: true });
+    if (!ready) return;
+  }
+
+  const ticketId = Number(state.csChat.ticketId || 0);
+  if (ticketId <= 0) return;
+
+  const afterId = force ? 0 : Math.max(0, Number(state.csChat.lastMessageId || 0));
+  csChatRequestInFlight = true;
+
+  try {
+    const params = new URLSearchParams({
+      ticket_id: String(ticketId),
+      after_id: String(afterId),
+    });
+    if (force) {
+      params.set('_t', String(Date.now()));
+    }
+
+    const { data } = await apiRequest(`./api/cs_chat_poll.php?${params.toString()}`, {
+      forceRefresh: force,
+      cacheTtlMs: 800,
+    });
+
+    if (!data?.status) {
+      return;
+    }
+
+    const payload = data.data || {};
+    const incomingMessages = Array.isArray(payload.messages) ? payload.messages : [];
+    const wasOpen = isCsChatPanelOpen();
+
+    if (afterId <= 0) {
+      state.csChat.messages = incomingMessages;
+      state.csChat.lastMessageId = Math.max(
+        0,
+        Number(payload.last_message_id || 0),
+        ...incomingMessages.map((row) => Number(row?.id || 0))
+      );
+    } else {
+      mergeCsChatMessages(incomingMessages);
+    }
+
+    state.csChat.mode = String(payload.mode || state.csChat.mode || 'bot').toLowerCase();
+    state.csChat.ticketId = Number(payload.ticket_id || state.csChat.ticketId || 0);
+    state.csChat.loaded = true;
+
+    if (!wasOpen && incomingMessages.length > 0) {
+      const incomingForUser = incomingMessages.filter((row) => String(row?.sender_role || '').toLowerCase() === 'admin').length;
+      state.csChat.unreadCount = Math.max(0, Number(state.csChat.unreadCount || 0) + incomingForUser);
+    }
+
+    renderCsChat();
+  } finally {
+    csChatRequestInFlight = false;
+  }
+}
+
+function stopCsChatPoller() {
+  if (csChatPollTimer) {
+    clearInterval(csChatPollTimer);
+    csChatPollTimer = null;
+  }
+}
+
+function startCsChatPoller() {
+  stopCsChatPoller();
+  if (!state.user) return;
+  csChatPollTimer = setInterval(() => {
+    if (document.hidden) return;
+    pollCsChat({ force: false }).catch(() => {
+      // Ignore background polling errors for CS chat.
+    });
+  }, CS_CHAT_POLL_MS);
+}
+
+function renderAdminCsChats() {
+  if (!adminCsSectionEl || !adminCsBodyEl) return;
+  const isAdmin = String(state.user?.role || '') === 'admin';
+  adminCsSectionEl.classList.toggle('hidden', !isAdmin);
+  if (!isAdmin) {
+    return;
+  }
+
+  const rows = Array.isArray(state.adminCsChats) ? state.adminCsChats : [];
+  if (!rows.length) {
+    adminCsBodyEl.innerHTML = '<tr><td colspan="7">Belum ada chat customer service.</td></tr>';
+    return;
+  }
+
+  adminCsBodyEl.innerHTML = rows.map((chat) => {
+    const chatId = Number(chat.id || 0);
+    const mode = String(chat.mode || (String(chat.category || '').toLowerCase().includes('admin') ? 'admin' : 'bot')).toLowerCase();
+    const modeLabel = mode === 'admin' ? 'Admin' : 'Bot';
+    const status = String(chat.status || 'open').toLowerCase();
+    const isClosed = status === 'closed';
+    const canTakeover = mode !== 'admin' && !isClosed;
+    const lastMessage = String(chat.last_message || '-');
+    const shortLastMessage = lastMessage.length > 120 ? `${lastMessage.slice(0, 120)}...` : lastMessage;
+
+    return `
+      <tr>
+        <td>#${escapeHtml(chatId)}</td>
+        <td>@${escapeHtml(chat.username || '-')}</td>
+        <td><span class="status ${mode === 'admin' ? 's-completed' : 's-other'}">${escapeHtml(modeLabel)}</span></td>
+        <td><span class="status ${ticketStatusClass(status)}">${escapeHtml(ticketStatusLabel(status))}</span></td>
+        <td title="${escapeHtml(lastMessage)}">${escapeHtml(shortLastMessage)}</td>
+        <td>${escapeHtml(formatDateTime(chat.last_message_at || chat.updated_at || ''))}</td>
+        <td>
+          <button type="button" class="mini-btn ghost" data-admin-cs-open="${escapeHtml(chatId)}">Buka</button>
+          ${canTakeover ? `<button type="button" class="mini-btn success" data-admin-cs-takeover="${escapeHtml(chatId)}">Ambil Alih</button>` : ''}
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+async function loadAdminCsChats(options = {}) {
+  const isAdmin = String(state.user?.role || '') === 'admin';
+  if (!isAdmin) {
+    state.adminCsChats = [];
+    state.adminCsChatsLoaded = false;
+    renderAdminCsChats();
+    return;
+  }
+
+  const force = !!options.force;
+  const silent = !!options.silent;
+  if (!force && state.adminCsChatsLoaded) {
+    renderAdminCsChats();
+    return;
+  }
+  if (csChatAdminRequestInFlight) return;
+
+  csChatAdminRequestInFlight = true;
+  try {
+    const endpoint = force
+      ? `./api/cs_chat_admin_list.php?status=active&limit=120&_t=${Date.now()}`
+      : './api/cs_chat_admin_list.php?status=active&limit=120';
+    const { data } = await apiRequest(endpoint, {
+      forceRefresh: force,
+      cacheTtlMs: 1500,
+    });
+
+    if (!data?.status) {
+      state.adminCsChats = [];
+      state.adminCsChatsLoaded = false;
+      renderAdminCsChats();
+      if (!silent) {
+        showNotice(adminCsNoticeEl, 'err', data?.data?.msg || 'Gagal memuat chat customer service.');
+      }
+      return;
+    }
+
+    state.adminCsChats = Array.isArray(data.data?.chats) ? data.data.chats : [];
+    state.adminCsChatsLoaded = true;
+    hideNotice(adminCsNoticeEl);
+    renderAdminCsChats();
+  } finally {
+    csChatAdminRequestInFlight = false;
+  }
+}
+
+function stopCsChatAdminPoller() {
+  if (csChatAdminPollTimer) {
+    clearInterval(csChatAdminPollTimer);
+    csChatAdminPollTimer = null;
+  }
+}
+
+function startCsChatAdminPoller() {
+  stopCsChatAdminPoller();
+  const isAdmin = String(state.user?.role || '') === 'admin';
+  if (!isAdmin) return;
+  csChatAdminPollTimer = setInterval(() => {
+    if (document.hidden) return;
+    loadAdminCsChats({ force: true, silent: true }).catch(() => {
+      // Ignore CS admin polling errors.
+    });
+  }, CS_CHAT_ADMIN_POLL_MS);
+}
+
+async function sendCsChatMessage() {
+  if (!state.user) return;
+  const message = String(csChatInputEl?.value || '').trim();
+  if (message === '') {
+    showNotice(csChatNoticeEl, 'err', 'Pesan tidak boleh kosong.');
+    return;
+  }
+
+  if (csChatSendBtnEl) csChatSendBtnEl.disabled = true;
+  showNotice(csChatNoticeEl, 'info', 'Mengirim pesan...');
+
+  try {
+    const { data } = await apiRequest('./api/cs_chat_send.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ticket_id: Number(state.csChat.ticketId || 0),
+        message,
+      }),
+    });
+
+    if (!data?.status) {
+      showNotice(csChatNoticeEl, 'err', data?.data?.msg || 'Gagal mengirim pesan.');
+      return;
+    }
+
+    const payload = data.data || {};
+    const messages = Array.isArray(payload.messages) ? payload.messages : [];
+    state.csChat.ticketId = Number(payload.ticket_id || state.csChat.ticketId || 0);
+    state.csChat.mode = String(payload.mode || state.csChat.mode || 'bot').toLowerCase();
+    state.csChat.messages = messages;
+    state.csChat.lastMessageId = Math.max(
+      0,
+      Number(payload.last_message_id || 0),
+      ...messages.map((row) => Number(row?.id || 0))
+    );
+    state.csChat.loaded = true;
+    state.csChat.unreadCount = 0;
+    if (csChatInputEl) {
+      csChatInputEl.value = '';
+    }
+
+    hideNotice(csChatNoticeEl);
+    renderCsChat();
+    if (String(state.user?.role || '') === 'admin') {
+      await loadAdminCsChats({ force: true, silent: true });
+    }
+  } finally {
+    if (csChatSendBtnEl) csChatSendBtnEl.disabled = false;
+  }
+}
+
+async function adminTakeoverCsChat(ticketId) {
+  const id = Number(ticketId || 0);
+  if (id <= 0) return;
+  const adminNote = window.prompt('Pesan takeover admin (opsional):', '');
+  if (adminNote === null) return;
+
+  showNotice(adminCsNoticeEl, 'info', `Mengambil alih chat #${id}...`);
+  const { data } = await apiRequest('./api/cs_chat_admin_takeover.php', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ticket_id: id,
+      message: adminNote,
+    }),
+  });
+
+  if (!data?.status) {
+    showNotice(adminCsNoticeEl, 'err', data?.data?.msg || 'Gagal mengambil alih chat.');
+    return;
+  }
+
+  showNotice(adminCsNoticeEl, 'ok', data?.data?.msg || 'Chat berhasil diambil alih admin.');
+  await Promise.all([
+    loadAdminCsChats({ force: true, silent: true }),
+    loadTickets({ force: true }),
+  ]);
+
+  if (Number(state.ticketDetail?.id || 0) === id) {
+    await loadTicketDetail(id);
+  }
+
+  if (Number(state.csChat.ticketId || 0) === id) {
+    await pollCsChat({ force: true }).catch(() => {
+      // Ignore CS widget refresh errors after takeover.
+    });
+  }
+}
+
+async function openAdminCsTicket(ticketId) {
+  const id = Number(ticketId || 0);
+  if (id <= 0) return;
+  applyPanelView('ticket');
+  updateUrlForView('ticket');
+  await ensureViewData('ticket', { force: true });
+  await loadTicketDetail(id);
 }
 
 async function saveAccountSettings() {
@@ -4274,8 +5035,13 @@ function isPakasirGatewayCheckout(checkout) {
   return String(gateway.provider || '').toLowerCase() === 'pakasir';
 }
 
+function normalizeCheckoutOrderType(value) {
+  return String(value || '').toLowerCase() === 'game' ? 'game' : 'ssm';
+}
+
 function handlePostPaymentConfirmation(orderId, options = {}) {
   const normalizedOrderId = Number(orderId || 0);
+  const orderType = normalizeCheckoutOrderType(options.orderType || state.lastCheckout?.order_type || 'ssm');
   const promptMessage = String(options.message || '').trim() || 'Konfirmasi pembayaran berhasil dikirim.';
   const openHistory = window.confirm(
     `${promptMessage}\n\nTekan OK untuk buka Riwayat Pesanan.\nTekan Cancel untuk lanjut cari item lain.`
@@ -4284,7 +5050,24 @@ function handlePostPaymentConfirmation(orderId, options = {}) {
   closePaymentQrModal();
 
   if (openHistory) {
-    focusOrderHistory(normalizedOrderId);
+    if (orderType === 'game') {
+      focusGameHistory(normalizedOrderId);
+    } else {
+      focusOrderHistory(normalizedOrderId);
+    }
+    return;
+  }
+
+  if (orderType === 'game') {
+    applyPanelView('game');
+    updateUrlForView('game');
+    if (gameServiceInputEl) {
+      try {
+        gameServiceInputEl.focus({ preventScroll: false });
+      } catch {
+        gameServiceInputEl.focus();
+      }
+    }
     return;
   }
 
@@ -4303,6 +5086,7 @@ function handlePostPaymentConfirmation(orderId, options = {}) {
 async function submitPaymentConfirmation(source = 'panel') {
   const checkout = state.lastCheckout;
   const noticeEl = source === 'modal' ? paymentQrNoticeEl : paymentConfirmNoticeEl;
+  const orderType = normalizeCheckoutOrderType(checkout?.order_type || 'ssm');
 
   if (!checkout?.order_id) {
     showNotice(noticeEl, 'err', 'Tidak ada checkout aktif untuk dikonfirmasi.');
@@ -4312,6 +5096,7 @@ async function submitPaymentConfirmation(source = 'panel') {
   const payload = {
     order_id: Number(checkout.order_id || 0),
     method_code: defaultPaymentMethodCode(),
+    renotify: true,
   };
 
   if (!payload.method_code) {
@@ -4324,7 +5109,9 @@ async function submitPaymentConfirmation(source = 'panel') {
     if (paymentQrConfirmBtnEl) paymentQrConfirmBtnEl.disabled = true;
     showNotice(noticeEl, 'info', 'Mengecek status pembayaran otomatis dari Pakasir...');
 
-    const statusData = await requestOrderStatusUpdate(Number(checkout.order_id || 0));
+    const statusData = orderType === 'game'
+      ? await requestGameOrderStatusUpdate(Number(checkout.order_id || 0))
+      : await requestOrderStatusUpdate(Number(checkout.order_id || 0));
 
     if (!statusData?.status) {
       if (paymentConfirmBtnEl) paymentConfirmBtnEl.disabled = false;
@@ -4336,20 +5123,32 @@ async function submitPaymentConfirmation(source = 'panel') {
     const latestStatusRaw = String(statusData?.data?.status || '').trim();
     const latestStatus = latestStatusRaw || 'Menunggu Pembayaran';
 
-    await Promise.all([
-      fetchSession({ attempts: SESSION_FETCH_RETRY_ATTEMPTS, softFail: true }),
-      loadOrders({ force: true }),
-      loadAdminPaymentOrders({ force: true }),
-      loadTop5Services({ force: true }),
-    ]);
+    if (orderType === 'game') {
+      await Promise.all([
+        fetchSession({ attempts: SESSION_FETCH_RETRY_ATTEMPTS, softFail: true }),
+        loadGameOrders({ force: true }),
+        loadGameAdminPendingOrders({ force: true }),
+      ]);
+    } else {
+      await Promise.all([
+        fetchSession({ attempts: SESSION_FETCH_RETRY_ATTEMPTS, softFail: true }),
+        loadOrders({ force: true }),
+        loadAdminPaymentOrders({ force: true }),
+        loadTop5Services({ force: true }),
+      ]);
+    }
 
     if (paymentConfirmBtnEl) paymentConfirmBtnEl.disabled = false;
     if (paymentQrConfirmBtnEl) paymentQrConfirmBtnEl.disabled = false;
 
     updateHeaderStats();
     const orderId = Number(checkout.order_id || 0);
-    const order = state.orders.find((item) => Number(item?.id || 0) === orderId) || null;
-    const orderStatus = order ? normalizeOrderStatus(order) : latestStatus;
+    const order = orderType === 'game'
+      ? (state.gameOrders.find((item) => Number(item?.id || 0) === orderId) || null)
+      : (state.orders.find((item) => Number(item?.id || 0) === orderId) || null);
+    const orderStatus = order
+      ? (orderType === 'game' ? normalizedGameStatus(order?.status || latestStatus) : normalizeOrderStatus(order))
+      : latestStatus;
 
     if (orderStatus === 'Diproses' || orderStatus === 'Selesai') {
       const successMessage = 'Pembayaran sudah terdeteksi otomatis. Order sedang diproses.';
@@ -4360,7 +5159,7 @@ async function submitPaymentConfirmation(source = 'panel') {
       if (noticeEl !== paymentQrNoticeEl && paymentQrNoticeEl) {
         showNotice(paymentQrNoticeEl, 'ok', successMessage);
       }
-      handlePostPaymentConfirmation(orderId, { message: successMessage });
+      handlePostPaymentConfirmation(orderId, { message: successMessage, orderType });
       return true;
     }
 
@@ -4380,7 +5179,10 @@ async function submitPaymentConfirmation(source = 'panel') {
   if (paymentQrConfirmBtnEl) paymentQrConfirmBtnEl.disabled = true;
   showNotice(noticeEl, 'info', 'Mengirim konfirmasi pembayaran...');
 
-  const { data } = await apiRequest('./api/order_payment_confirm.php', {
+  const confirmEndpoint = orderType === 'game'
+    ? './api/game_order_payment_confirm.php'
+    : './api/order_payment_confirm.php';
+  const { data } = await apiRequest(confirmEndpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -4403,13 +5205,21 @@ async function submitPaymentConfirmation(source = 'panel') {
     showNotice(paymentQrNoticeEl, 'ok', successMessage);
   }
 
-  await Promise.all([
-    fetchSession({ attempts: SESSION_FETCH_RETRY_ATTEMPTS, softFail: true }),
-    loadOrders({ force: true }),
-    loadAdminPaymentOrders({ force: true }),
-  ]);
+  if (orderType === 'game') {
+    await Promise.all([
+      fetchSession({ attempts: SESSION_FETCH_RETRY_ATTEMPTS, softFail: true }),
+      loadGameOrders({ force: true }),
+      loadGameAdminPendingOrders({ force: true }),
+    ]);
+  } else {
+    await Promise.all([
+      fetchSession({ attempts: SESSION_FETCH_RETRY_ATTEMPTS, softFail: true }),
+      loadOrders({ force: true }),
+      loadAdminPaymentOrders({ force: true }),
+    ]);
+  }
   updateHeaderStats();
-  handlePostPaymentConfirmation(payload.order_id);
+  handlePostPaymentConfirmation(payload.order_id, { orderType });
   return true;
 }
 
@@ -4442,8 +5252,13 @@ function focusOrderHistory(orderId) {
 }
 
 function openPaymentQrModal(orderData) {
+  const orderType = normalizeCheckoutOrderType(orderData?.order_type || state.lastCheckout?.order_type || 'ssm');
   if (!paymentQrModalEl || !paymentQrSummaryEl || !paymentQrImageEl) {
-    focusOrderHistory(orderData?.order_id);
+    if (orderType === 'game') {
+      focusGameHistory(orderData?.order_id);
+    } else {
+      focusOrderHistory(orderData?.order_id);
+    }
     return;
   }
 
@@ -4898,12 +5713,674 @@ async function checkRefillStatus(refillId) {
   await loadRefills({ force: true });
 }
 
+function renderGameComingSoonState() {
+  if (!GAME_TOPUP_COMING_SOON) {
+    return false;
+  }
+
+  if (gameOrderFormEl) {
+    const controls = gameOrderFormEl.querySelectorAll('input, select, textarea, button');
+    controls.forEach((control) => {
+      if (!(control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLTextAreaElement || control instanceof HTMLButtonElement)) {
+        return;
+      }
+      control.disabled = true;
+    });
+  }
+
+  if (gameOrderNoticeEl) {
+    showNotice(
+      gameOrderNoticeEl,
+      'info',
+      'Fitur Topup Game sedang coming soon. Tim Odyssiavault sedang finalisasi agar lebih stabil untuk buyer.'
+    );
+  }
+
+  if (gameHistorySummaryEl) {
+    gameHistorySummaryEl.textContent = 'Topup Game Coming Soon';
+  }
+
+  if (gameOrdersBodyEl) {
+    gameOrdersBodyEl.innerHTML = '<tr><td colspan="9">Fitur Topup Game masih coming soon.</td></tr>';
+  }
+
+  if (gameOrderNoticeBottomEl) {
+    hideNotice(gameOrderNoticeBottomEl);
+  }
+
+  if (gameAdminPendingPanelEl) {
+    gameAdminPendingPanelEl.classList.add('hidden');
+  }
+
+  return true;
+}
+
+function clearGameServiceSelection(options = {}) {
+  const clearInput = options.clearInput !== false;
+  state.gameSelectedService = null;
+  gameServiceSuggestionItems = [];
+  gameSuggestRenderKey = '';
+  if (clearInput && gameServiceInputEl) {
+    gameServiceInputEl.value = '';
+  }
+  if (gamePriceViewEl) {
+    gamePriceViewEl.value = 'Rp0';
+  }
+  if (gameServiceInfoEl) {
+    gameServiceInfoEl.textContent = 'Mulai ketik layanan game untuk melihat detail produk.';
+  }
+  hideGameServiceSuggestions();
+}
+
+function renderGameServiceInfo(service) {
+  if (!gameServiceInfoEl) return;
+  if (!service) {
+    gameServiceInfoEl.textContent = 'Mulai ketik layanan game untuk melihat detail produk.';
+    return;
+  }
+
+  const activeLabel = service.is_active ? 'Aktif' : (service.status || 'Tidak Aktif');
+  const lines = [
+    `Produk: ${service.name || '-'}`,
+    `Kode: #${service.id || '-'}`,
+    `Kategori: ${service.category || '-'}`,
+    `Status: ${activeLabel}`,
+    `Harga: ${rupiah(service.sell_price || 0)}`,
+  ];
+  gameServiceInfoEl.textContent = lines.join('\n');
+}
+
+function renderGameServiceSuggestions(services, rawInput = '') {
+  if (!gameServiceSuggestPanelEl || !gameServiceInputEl) {
+    return;
+  }
+
+  const list = Array.isArray(services) ? services : [];
+  gameServiceSuggestionItems = list;
+  const hasFocus = document.activeElement === gameServiceInputEl;
+  if (!hasFocus || list.length === 0) {
+    hideGameServiceSuggestions();
+    return;
+  }
+
+  const query = normalizeQuery(rawInput);
+  const signature = list.length > 0
+    ? `${list.length}:${String(list[0]?.id || '')}:${String(list[list.length - 1]?.id || '')}`
+    : '0';
+  const renderKey = `${query}|${signature}`;
+  if (gameSuggestRenderKey === renderKey && !gameServiceSuggestPanelEl.classList.contains('hidden')) {
+    return;
+  }
+
+  const itemsHtml = list.map((service, index) => `
+    <button type="button" class="suggest-option" data-suggest-kind="game-service" data-suggest-index="${index}">
+      <span class="suggest-main">${escapeHtml(service.option_label || `#${service.id} - ${service.name}`)}</span>
+      <span class="suggest-sub">${escapeHtml(service.category || '-')}${service.sell_price ? ` | ${escapeHtml(rupiah(service.sell_price))}` : ''}</span>
+    </button>
+  `).join('');
+
+  gameServiceSuggestPanelEl.innerHTML = `
+    <div class="suggest-header">Saran Layanan Game (${list.length})</div>
+    <div class="suggest-list">${itemsHtml}</div>
+  `;
+  gameServiceSuggestPanelEl.dataset.mobile = isMobileSuggestionViewport() ? '1' : '0';
+  positionSuggestionPanel(gameServiceSuggestPanelEl, gameServiceInputEl);
+  gameServiceSuggestPanelEl.classList.remove('hidden');
+  gameSuggestRenderKey = renderKey;
+}
+
+function applySelectedGameService(service, options = {}) {
+  if (!service) {
+    clearGameServiceSelection({ clearInput: false });
+    return;
+  }
+
+  state.gameSelectedService = service;
+  if (gameServiceInputEl && options.keepInput !== true) {
+    gameServiceInputEl.value = service.option_label || `#${service.id} - ${service.name || ''}`;
+  }
+  if (gamePriceViewEl) {
+    gamePriceViewEl.value = rupiah(service.sell_price || 0);
+  }
+  renderGameServiceInfo(service);
+  if (options.hideSuggestions !== false) {
+    hideGameServiceSuggestions();
+  }
+}
+
+async function loadGameCategories(options = {}) {
+  const force = !!options.force;
+  if (!force && state.gameServicesLoaded && Array.isArray(state.gameServices) && state.gameServices.length > 0 && gameCategorySelectEl?.options?.length > 1) {
+    return;
+  }
+
+  if (force && state.gameServiceSearchCache instanceof Map) {
+    state.gameServiceSearchCache.clear();
+  }
+
+  const endpoint = force
+    ? `./api/game_services.php?mode=categories&_t=${Date.now()}`
+    : './api/game_services.php?mode=categories';
+  const { data } = await apiRequest(endpoint, { forceRefresh: force });
+  if (!data?.status) {
+    state.gameServicesLoaded = false;
+    if (gameOrderNoticeEl) {
+      showNotice(gameOrderNoticeEl, 'err', data?.data?.msg || 'Gagal memuat kategori game.');
+    }
+    return;
+  }
+
+  const categories = Array.isArray(data?.data?.categories) ? data.data.categories : [];
+  state.gameServices = categories;
+  state.gameServicesLoaded = true;
+  if (!gameCategorySelectEl) return;
+  const currentValue = String(gameCategorySelectEl.value || '');
+  gameCategorySelectEl.innerHTML = [
+    '<option value="">Semua Kategori</option>',
+    ...categories.map((category) => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`),
+  ].join('');
+  if (currentValue && categories.includes(currentValue)) {
+    gameCategorySelectEl.value = currentValue;
+  }
+}
+
+function trimGameSearchCache() {
+  if (!(state.gameServiceSearchCache instanceof Map)) return;
+  if (state.gameServiceSearchCache.size <= GAME_SEARCH_CACHE_MAX_KEYS) return;
+
+  const keys = Array.from(state.gameServiceSearchCache.keys());
+  const removeCount = state.gameServiceSearchCache.size - GAME_SEARCH_CACHE_MAX_KEYS;
+  for (let i = 0; i < removeCount; i += 1) {
+    state.gameServiceSearchCache.delete(keys[i]);
+  }
+}
+
+async function searchGameServices(query, category = '', options = {}) {
+  const force = !!options.force;
+  const normalizedQuery = String(query || '').trim();
+  const normalizedCategory = String(category || '').trim();
+  const cacheKey = `${normalizedCategory}|${normalizeQuery(normalizedQuery)}`;
+
+  if (!force && state.gameServiceSearchCache instanceof Map && state.gameServiceSearchCache.has(cacheKey)) {
+    return state.gameServiceSearchCache.get(cacheKey) || [];
+  }
+
+  const params = new URLSearchParams({
+    mode: 'search',
+    q: normalizedQuery,
+    limit: '40',
+  });
+  if (normalizedCategory) {
+    params.set('category', normalizedCategory);
+  }
+  if (force) {
+    params.set('_t', String(Date.now()));
+  }
+
+  const requestId = ++state.gameServicesRequestId;
+  const { data } = await apiRequest(`./api/game_services.php?${params.toString()}`, {
+    forceRefresh: force,
+  });
+  if (requestId !== state.gameServicesRequestId) {
+    return [];
+  }
+  if (!data?.status) {
+    return [];
+  }
+
+  const services = Array.isArray(data?.data?.services) ? data.data.services : [];
+  if (state.gameServiceSearchCache instanceof Map) {
+    state.gameServiceSearchCache.set(cacheKey, services);
+    trimGameSearchCache();
+  }
+  return services;
+}
+
+async function resolveGameServiceByInput() {
+  if (!gameServiceInputEl) return null;
+
+  const raw = String(gameServiceInputEl.value || '').trim();
+  if (raw === '') return null;
+
+  if (state.gameSelectedService && (state.gameSelectedService.option_label === raw || `#${state.gameSelectedService.id}` === raw)) {
+    return state.gameSelectedService;
+  }
+
+  const idMatch = raw.match(/^#?\s*([A-Za-z0-9_]+)/);
+  const id = String(idMatch?.[1] || '').trim();
+  if (id) {
+    const { data } = await apiRequest(`./api/game_services.php?mode=detail&id=${encodeURIComponent(id)}`);
+    if (data?.status) {
+      return data?.data?.service || null;
+    }
+  }
+
+  const category = String(gameCategorySelectEl?.value || '').trim();
+  const candidates = await searchGameServices(raw, category, { force: false });
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return null;
+  }
+
+  const exact = normalizeQuery(raw);
+  const found = candidates.find((candidate) => {
+    const optionLabel = normalizeQuery(candidate?.option_label || '');
+    const nameLabel = normalizeQuery(candidate?.name || '');
+    return optionLabel === exact || nameLabel === exact;
+  });
+  return found || candidates[0] || null;
+}
+
+async function refreshGameServiceSuggestions(options = {}) {
+  if (!gameServiceInputEl) {
+    return;
+  }
+
+  const force = !!options.force;
+  const query = String(gameServiceInputEl.value || '').trim();
+  const category = String(gameCategorySelectEl?.value || '').trim();
+
+  if (query.length < GAME_QUERY_MIN_CHARS) {
+    hideGameServiceSuggestions();
+    return;
+  }
+
+  const services = await searchGameServices(query, category, { force });
+  renderGameServiceSuggestions(services, query);
+}
+
+function normalizeGameContactInput(value) {
+  let normalized = String(value || '').trim();
+  if (!normalized) return '';
+  normalized = normalized.replace(/[^\d+]/g, '');
+  if (normalized.startsWith('+')) {
+    normalized = normalized.slice(1);
+  }
+  if (normalized.startsWith('0')) {
+    normalized = `62${normalized.slice(1)}`;
+  }
+  return normalized;
+}
+
+async function submitGameOrder() {
+  if (!gameOrderFormEl) return;
+  if (GAME_TOPUP_COMING_SOON) {
+    renderGameComingSoonState();
+    return;
+  }
+
+  const target = String(gameTargetInputEl?.value || '').trim();
+  const contact = normalizeGameContactInput(gameContactInputEl?.value || '');
+
+  if (!target) {
+    showNotice(gameOrderNoticeEl, 'err', 'ID target game wajib diisi.');
+    return;
+  }
+  if (!contact || !/^\d{8,20}$/.test(contact)) {
+    showNotice(gameOrderNoticeEl, 'err', 'Kontak WhatsApp wajib diisi dengan format angka yang valid.');
+    return;
+  }
+
+  let service = state.gameSelectedService;
+  if (!service) {
+    service = await resolveGameServiceByInput();
+  }
+
+  if (!service || !service.id) {
+    showNotice(gameOrderNoticeEl, 'err', 'Layanan topup game tidak ditemukan. Pilih dari saran layanan.');
+    return;
+  }
+
+  if ((service.is_active ?? true) === false) {
+    showNotice(gameOrderNoticeEl, 'err', 'Layanan topup game sedang tidak aktif. Pilih layanan lain.');
+    return;
+  }
+
+  state.gameSelectedService = service;
+  applySelectedGameService(service, { hideSuggestions: true });
+  hideNotice(gameOrderNoticeBottomEl);
+  showNotice(gameOrderNoticeEl, 'info', 'Membuat checkout topup game...');
+
+  const payload = {
+    service_id: String(service.id),
+    target,
+    contact,
+  };
+
+  const { data } = await apiRequest('./api/game_order.php', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!data?.status) {
+    showNotice(gameOrderNoticeEl, 'err', data?.data?.msg || 'Checkout topup game gagal diproses.');
+    return;
+  }
+
+  const info = (data.data && typeof data.data === 'object') ? data.data : {};
+  const orderId = Number(info.order_id || 0);
+  showNotice(
+    gameOrderNoticeEl,
+    'ok',
+    `Checkout game berhasil dibuat.\nOrder ID: #${orderId || '-'}\nTotal Bayar: ${rupiah(info.total_sell_price || 0)}\nLanjutkan pembayaran via QR.`
+  );
+
+  if (gameTargetInputEl) gameTargetInputEl.value = '';
+  if (gameContactInputEl) gameContactInputEl.value = '';
+  clearGameServiceSelection({ clearInput: true });
+
+  renderCheckoutPanel(info);
+  await Promise.all([
+    fetchSession({ attempts: SESSION_FETCH_RETRY_ATTEMPTS, softFail: true }),
+    loadGameOrders({ force: true }),
+    loadGameAdminPendingOrders({ force: true }),
+  ]);
+  updateHeaderStats();
+  openPaymentQrModal(info);
+}
+
+async function verifyGamePaymentByAdmin(orderId, action, adminNote = '') {
+  const normalizedOrderId = Number(orderId || 0);
+  const normalizedAction = String(action || '').trim().toLowerCase();
+  if (normalizedOrderId <= 0 || !['verify', 'cancel'].includes(normalizedAction)) {
+    return false;
+  }
+
+  showNotice(gameAdminPendingNoticeEl, 'info', 'Memproses verifikasi pembayaran game...');
+  const { data } = await apiRequest('./api/game_order_admin_verify.php', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      order_id: normalizedOrderId,
+      action: normalizedAction,
+      admin_note: String(adminNote || ''),
+    }),
+  });
+
+  if (!data?.status) {
+    showNotice(gameAdminPendingNoticeEl, 'err', data?.data?.msg || 'Gagal memproses verifikasi pembayaran game.');
+    return false;
+  }
+
+  showNotice(gameAdminPendingNoticeEl, 'ok', data?.data?.msg || 'Verifikasi pembayaran game berhasil diproses.');
+  await Promise.all([
+    fetchSession({ attempts: SESSION_FETCH_RETRY_ATTEMPTS, softFail: true }),
+    loadGameOrders({ force: true }),
+    loadGameAdminPendingOrders({ force: true }),
+  ]);
+  updateHeaderStats();
+  return true;
+}
+
+function normalizedGameStatus(status) {
+  const value = String(status || '').trim();
+  if (!value) return 'Menunggu Pembayaran';
+
+  const key = value.toLowerCase();
+  if (key.includes('menunggu pembayaran') || key.includes('waiting payment')) return 'Menunggu Pembayaran';
+  if (key.includes('selesai') || key.includes('success') || key.includes('completed') || key.includes('done')) return 'Selesai';
+  if (key.includes('dibatalkan') || key.includes('cancel') || key.includes('error') || key.includes('failed') || key.includes('refund')) return 'Dibatalkan';
+  if (key.includes('diproses') || key.includes('pending') || key.includes('processing') || key.includes('progress')) return 'Diproses';
+  return value;
+}
+
+function normalizedGameStatusKey(status) {
+  return normalizedGameStatus(status).toUpperCase();
+}
+
+function renderGameOrders() {
+  if (!gameOrdersBodyEl) return;
+
+  const rows = Array.isArray(state.gameOrders) ? state.gameOrders : [];
+  const statusFilter = String(state.gameHistoryFilter?.status || 'ALL').toUpperCase();
+  const idQuery = String(state.gameHistoryFilter?.idQuery || '').trim();
+  const serviceQuery = normalizeQuery(String(state.gameHistoryFilter?.serviceQuery || ''));
+
+  const filtered = rows.filter((order) => {
+    const status = normalizedGameStatus(order?.status || '');
+    const statusKey = normalizedGameStatusKey(status);
+    if (statusFilter !== 'ALL' && statusKey !== statusFilter) {
+      return false;
+    }
+    if (idQuery && !String(order?.id || '').includes(idQuery)) {
+      return false;
+    }
+    if (serviceQuery) {
+      const haystack = normalizeQuery(`${order?.service_name || ''} ${order?.category || ''}`);
+      if (!haystack.includes(serviceQuery)) {
+        return false;
+      }
+    }
+    return true;
+  });
+
+  if (gameHistorySummaryEl) {
+    gameHistorySummaryEl.textContent = `Menampilkan ${filtered.length} data topup game`;
+  }
+
+  if (!filtered.length) {
+    gameOrdersBodyEl.innerHTML = '<tr><td colspan="9">Belum ada order topup game.</td></tr>';
+    return;
+  }
+
+  gameOrdersBodyEl.innerHTML = filtered.map((order) => {
+    const status = normalizedGameStatus(order.status);
+    const normalized = normalizeOrderStatus({ status });
+    const providerOrder = String(order.provider_order_id || '-');
+    return `
+      <tr>
+        <td>#${escapeHtml(order.id)}</td>
+        <td>${escapeHtml(order.service_name || '-')}</td>
+        <td>${escapeHtml(order.target || '-')}</td>
+        <td>${escapeHtml(order.contact || '-')}</td>
+        <td>${rupiah(order.total_sell_price || 0)}</td>
+        <td><span class="status ${statusClass(normalized)}">${escapeHtml(displayOrderStatus(normalized))}</span></td>
+        <td>${escapeHtml(providerOrder)}</td>
+        <td>${escapeHtml(formatDateTime(order.created_at || order.updated_at || ''))}</td>
+        <td>
+          <button type="button" class="mini-btn ghost" data-game-action="status" data-game-order-id="${escapeHtml(order.id)}">Cek Status</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+async function loadGameOrders(options = {}) {
+  const force = !!options.force;
+  if (!force && state.gameOrdersLoaded) {
+    renderGameOrders();
+    return;
+  }
+
+  const requestId = ++state.gameOrdersRequestId;
+  const { data } = await apiRequest('./api/game_orders.php?limit=200', {
+    forceRefresh: force,
+  });
+  if (requestId !== state.gameOrdersRequestId) {
+    return;
+  }
+
+  if (!data?.status) {
+    state.gameOrders = [];
+    state.gameOrdersLoaded = false;
+    renderGameOrders();
+    if (gameOrderNoticeBottomEl) {
+      showNotice(gameOrderNoticeBottomEl, 'err', data?.data?.msg || 'Gagal memuat riwayat topup game.');
+    }
+    return;
+  }
+
+  state.gameOrders = Array.isArray(data?.data?.orders) ? data.data.orders : [];
+  state.gameOrdersLoaded = true;
+  renderGameOrders();
+}
+
+function renderGameAdminPendingOrders() {
+  if (!gameAdminPendingPanelEl || !gameAdminPendingBodyEl) return;
+
+  const isAdmin = String(state.user?.role || '') === 'admin';
+  gameAdminPendingPanelEl.classList.toggle('hidden', !isAdmin);
+  if (!isAdmin) {
+    return;
+  }
+
+  const rows = Array.isArray(state.gameAdminPendingOrders) ? state.gameAdminPendingOrders : [];
+  if (!rows.length) {
+    gameAdminPendingBodyEl.innerHTML = '<tr><td colspan="7">Tidak ada pembayaran game yang menunggu verifikasi.</td></tr>';
+    return;
+  }
+
+  gameAdminPendingBodyEl.innerHTML = rows.map((order) => `
+    <tr>
+      <td>#${escapeHtml(order.id)}</td>
+      <td>${escapeHtml(order.username || '-')}</td>
+      <td>${escapeHtml(order.service_name || '-')}</td>
+      <td>${rupiah(order.total_sell_price || 0)}</td>
+      <td>${escapeHtml(order.payment_confirmed_at ? formatDateTime(order.payment_confirmed_at) : 'Belum konfirmasi')}</td>
+      <td>${escapeHtml(formatDateTime(order.payment_deadline_at || ''))}</td>
+      <td>
+        <button type="button" class="mini-btn success" data-game-admin-action="verify" data-game-admin-order="${escapeHtml(order.id)}">Verifikasi</button>
+        <button type="button" class="mini-btn danger" data-game-admin-action="cancel" data-game-admin-order="${escapeHtml(order.id)}">Batalkan</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+async function loadGameAdminPendingOrders(options = {}) {
+  const force = !!options.force;
+  const isAdmin = String(state.user?.role || '') === 'admin';
+  if (!isAdmin) {
+    state.gameAdminPendingOrders = [];
+    state.gameAdminPendingLoaded = false;
+    renderGameAdminPendingOrders();
+    return;
+  }
+
+  if (!force && state.gameAdminPendingLoaded) {
+    renderGameAdminPendingOrders();
+    return;
+  }
+
+  const requestId = ++state.gameAdminPendingRequestId;
+  const { data } = await apiRequest('./api/game_order_admin_payments.php?status=waiting&limit=120', {
+    forceRefresh: force,
+  });
+  if (requestId !== state.gameAdminPendingRequestId) {
+    return;
+  }
+
+  if (!data?.status) {
+    state.gameAdminPendingOrders = [];
+    state.gameAdminPendingLoaded = false;
+    renderGameAdminPendingOrders();
+    if (gameAdminPendingNoticeEl) {
+      showNotice(gameAdminPendingNoticeEl, 'err', data?.data?.msg || 'Gagal memuat verifikasi pembayaran game.');
+    }
+    return;
+  }
+
+  state.gameAdminPendingOrders = Array.isArray(data?.data?.orders) ? data.data.orders : [];
+  state.gameAdminPendingLoaded = true;
+  renderGameAdminPendingOrders();
+}
+
+async function requestGameOrderStatusUpdate(orderId) {
+  const normalizedOrderId = Number(orderId || 0);
+  if (!Number.isFinite(normalizedOrderId) || normalizedOrderId <= 0) {
+    return {
+      status: false,
+      data: { msg: 'Order ID game tidak valid.' },
+    };
+  }
+
+  const { data } = await apiRequest('./api/game_order_status.php', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order_id: normalizedOrderId }),
+  });
+
+  return data || {
+    status: false,
+    data: { msg: 'Gagal mengecek status topup game.' },
+  };
+}
+
+async function checkGameOrderStatus(orderId) {
+  if (gameOrderNoticeBottomEl) {
+    showNotice(gameOrderNoticeBottomEl, 'info', `Mengecek status topup game #${orderId}...`);
+  }
+
+  const data = await requestGameOrderStatusUpdate(orderId);
+  if (!data?.status) {
+    if (gameOrderNoticeBottomEl) {
+      showNotice(gameOrderNoticeBottomEl, 'err', data?.data?.msg || 'Gagal mengecek status topup game.');
+    }
+    return;
+  }
+
+  if (gameOrderNoticeBottomEl) {
+    showNotice(gameOrderNoticeBottomEl, 'ok', `Status order game #${orderId}: ${data?.data?.status || 'Diproses'}`);
+  }
+
+  await loadGameOrders({ force: true });
+}
+
+function focusGameHistory(orderId) {
+  if (GAME_TOPUP_COMING_SOON) {
+    applyPanelView('game');
+    updateUrlForView('game');
+    renderGameComingSoonState();
+    return;
+  }
+
+  const normalizedOrderId = Number(orderId || 0);
+  applyPanelView('game');
+  updateUrlForView('game');
+
+  state.gameHistoryFilter.status = 'Menunggu Pembayaran';
+  state.gameHistoryFilter.idQuery = normalizedOrderId > 0 ? String(normalizedOrderId) : '';
+  state.gameHistoryFilter.serviceQuery = '';
+  if (gameHistoryStatusEl) {
+    gameHistoryStatusEl.value = 'Menunggu Pembayaran';
+  }
+  if (gameHistoryIdSearchEl) {
+    gameHistoryIdSearchEl.value = state.gameHistoryFilter.idQuery;
+  }
+  if (gameHistoryServiceSearchEl) {
+    gameHistoryServiceSearchEl.value = '';
+  }
+  renderGameOrders();
+  loadGameOrders({ force: true }).catch(() => {
+    // Ignore background refresh error when focusing game history.
+  });
+
+  if (gameOrderNoticeBottomEl) {
+    showNotice(
+      gameOrderNoticeBottomEl,
+      'info',
+      normalizedOrderId > 0
+        ? `Order game #${normalizedOrderId} menunggu konfirmasi admin untuk pembayaran.`
+        : 'Order game menunggu konfirmasi admin untuk pembayaran.'
+    );
+  }
+
+  if (gameSectionEl) {
+    scrollElementIntoView(gameSectionEl, 'start');
+  }
+}
+
 async function ensureViewData(view, options = {}) {
   const force = !!options.force;
   const normalizedView = normalizePanelView(view);
   const isAdmin = String(state.user?.role || '') === 'admin';
 
   switch (normalizedView) {
+    case 'utama':
+      await Promise.all([
+        loadPanelHighlights({ force }),
+        loadTop5Services({ force }),
+      ]);
+      break;
     case 'dashboard':
       await Promise.all([
         loadNews({ force }),
@@ -4929,6 +6406,17 @@ async function ensureViewData(view, options = {}) {
     case 'refill':
       await loadRefills({ force });
       break;
+    case 'game':
+      if (GAME_TOPUP_COMING_SOON) {
+        renderGameComingSoonState();
+        break;
+      }
+      await Promise.all([
+        loadGameCategories({ force }),
+        loadGameOrders({ force }),
+        loadGameAdminPendingOrders({ force }),
+      ]);
+      break;
     case 'deposit':
       await Promise.all([
         loadDepositHistory({ force }),
@@ -4950,6 +6438,7 @@ async function ensureViewData(view, options = {}) {
           loadAdminPaymentOrders({ force }),
           loadAdminOrderHistory({ force }),
           loadAdminNews({ force }),
+          loadAdminCsChats({ force }),
         ]);
       }
       break;
@@ -4963,6 +6452,9 @@ async function refreshDashboard() {
   hideNotice(ordersNotice);
   if (refillNoticeEl) hideNotice(refillNoticeEl);
   if (refillStatusNoticeEl) hideNotice(refillStatusNoticeEl);
+  if (gameOrderNoticeEl) hideNotice(gameOrderNoticeEl);
+  if (gameOrderNoticeBottomEl) hideNotice(gameOrderNoticeBottomEl);
+  if (gameAdminPendingNoticeEl) hideNotice(gameAdminPendingNoticeEl);
   if (newsNoticeEl) hideNotice(newsNoticeEl);
   const loggedIn = await fetchSession({
     attempts: SESSION_FETCH_RETRY_ATTEMPTS,
@@ -4970,9 +6462,9 @@ async function refreshDashboard() {
   });
   if (!loggedIn) return;
 
-  await ensureViewData(state.currentView || 'dashboard', { force: true });
+  await ensureViewData(state.currentView || 'utama', { force: true });
 
-  applyPanelView(state.currentView || 'dashboard');
+  applyPanelView(state.currentView || 'utama');
 }
 
 if (tabLogin) {
@@ -5081,8 +6573,8 @@ if (btnOpenSettingsEl) {
   });
 }
 
-async function completeAuthFlowAfterSuccess(preferredView = 'dashboard') {
-  const targetView = normalizePanelView(preferredView || 'dashboard');
+async function completeAuthFlowAfterSuccess(preferredView = 'utama') {
+  const targetView = normalizePanelView(preferredView || 'utama');
   const loggedIn = await fetchSession({
     attempts: SESSION_FETCH_RETRY_ATTEMPTS,
     softFail: false,
@@ -5124,7 +6616,7 @@ if (loginForm) {
     }
 
     showNotice(authNotice, 'ok', 'Login berhasil. Menyiapkan dashboard...');
-    await completeAuthFlowAfterSuccess('dashboard');
+    await completeAuthFlowAfterSuccess('utama');
   });
 }
 
@@ -5165,7 +6657,7 @@ if (registerForm) {
     }
 
     showNotice(authNotice, 'ok', 'Registrasi berhasil. Menyiapkan dashboard...');
-    await completeAuthFlowAfterSuccess('dashboard');
+    await completeAuthFlowAfterSuccess('utama');
   });
 }
 
@@ -5323,6 +6815,13 @@ if (orderFormEl) {
   });
 }
 
+if (gameOrderFormEl) {
+  gameOrderFormEl.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    await submitGameOrder();
+  });
+}
+
 if (paymentConfirmBtnEl) {
   paymentConfirmBtnEl.addEventListener('click', async () => {
     await submitPaymentConfirmation('panel');
@@ -5411,7 +6910,12 @@ if (paymentQrModalEl) {
 if (paymentQrToHistoryEl) {
   paymentQrToHistoryEl.addEventListener('click', () => {
     closePaymentQrModal();
-    focusOrderHistory(state.lastCheckout?.order_id || 0);
+    const orderType = normalizeCheckoutOrderType(state.lastCheckout?.order_type || 'ssm');
+    if (orderType === 'game') {
+      focusGameHistory(state.lastCheckout?.order_id || 0);
+    } else {
+      focusOrderHistory(state.lastCheckout?.order_id || 0);
+    }
   });
 }
 
@@ -5429,6 +6933,10 @@ document.addEventListener('click', (event) => {
     closeAccountMenu();
   }
 
+  if (csChatWidgetEl && isCsChatPanelOpen() && !csChatWidgetEl.contains(target)) {
+    setCsChatPanelOpen(false);
+  }
+
   if (!isSuggestionInteractiveTarget(target)) {
     hideAllSuggestions();
   }
@@ -5440,6 +6948,7 @@ document.addEventListener('keydown', (event) => {
     closeAccountMenu();
     closeNewsModal();
     closePaymentQrModal();
+    setCsChatPanelOpen(false);
   }
 });
 
@@ -5453,10 +6962,16 @@ document.addEventListener('visibilitychange', () => {
     loadAdminPaymentOrders({ force: true, silent: true, detectNew: true }).catch(() => {
       // Ignore foreground resume polling error.
     });
+    loadAdminCsChats({ force: true, silent: true }).catch(() => {
+      // Ignore foreground CS admin polling error.
+    });
   }
 
   syncPendingPaymentOrders({ silent: true, detectProgress: true }).catch(() => {
     // Ignore foreground resume sync error.
+  });
+  pollCsChat({ force: true }).catch(() => {
+    // Ignore foreground CS poll error.
   });
 });
 
@@ -5578,6 +7093,69 @@ if (ticketCloseDetailBtnEl) {
   });
 }
 
+if (csChatToggleEl) {
+  csChatToggleEl.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const nextOpen = !isCsChatPanelOpen();
+    if (nextOpen) {
+      await ensureCsChatBootstrap({ force: false, silent: false });
+    }
+    setCsChatPanelOpen(nextOpen);
+    renderCsChat();
+  });
+}
+
+if (csChatCloseBtnEl) {
+  csChatCloseBtnEl.addEventListener('click', () => {
+    setCsChatPanelOpen(false);
+  });
+}
+
+if (csChatFormEl) {
+  csChatFormEl.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    await sendCsChatMessage();
+  });
+}
+
+if (csChatTakeoverBtnEl) {
+  csChatTakeoverBtnEl.addEventListener('click', async () => {
+    const ticketId = Number(state.csChat?.ticketId || 0);
+    if (ticketId <= 0) return;
+    await adminTakeoverCsChat(ticketId);
+    renderCsChat();
+  });
+}
+
+if (adminCsRefreshBtnEl) {
+  adminCsRefreshBtnEl.addEventListener('click', async () => {
+    showNotice(adminCsNoticeEl, 'info', 'Memuat ulang chat customer service...');
+    await loadAdminCsChats({ force: true, silent: false });
+    showNotice(adminCsNoticeEl, 'ok', 'Data chat customer service berhasil diperbarui.');
+  });
+}
+
+if (adminCsBodyEl) {
+  adminCsBodyEl.addEventListener('click', async (event) => {
+    const openBtn = event.target.closest('[data-admin-cs-open]');
+    if (openBtn) {
+      const ticketId = Number(openBtn.dataset.adminCsOpen || 0);
+      if (ticketId > 0) {
+        await openAdminCsTicket(ticketId);
+      }
+      return;
+    }
+
+    const takeoverBtn = event.target.closest('[data-admin-cs-takeover]');
+    if (takeoverBtn) {
+      const ticketId = Number(takeoverBtn.dataset.adminCsTakeover || 0);
+      if (ticketId > 0) {
+        await adminTakeoverCsChat(ticketId);
+      }
+    }
+  });
+}
+
 if (categoryInputEl) {
   const debouncedFillCategoryOptions = debounce(fillCategoryOptions, CATEGORY_INPUT_DEBOUNCE_MS);
   categoryInputEl.addEventListener('input', debouncedFillCategoryOptions);
@@ -5613,34 +7191,105 @@ if (serviceInputEl) {
   });
 }
 
+if (gameCategorySelectEl) {
+  gameCategorySelectEl.addEventListener('change', () => {
+    clearGameServiceSelection({ clearInput: true });
+    hideGameServiceSuggestions();
+    if (gameServiceInputEl && String(gameServiceInputEl.value || '').trim().length >= GAME_QUERY_MIN_CHARS) {
+      refreshGameServiceSuggestions({ force: false }).catch(() => {
+        // Ignore suggestion refresh errors after category change.
+      });
+    }
+  });
+}
+
+if (gameServiceInputEl) {
+  const debouncedGameServiceSearch = debounce(() => {
+    refreshGameServiceSuggestions({ force: false }).catch(() => {
+      // Ignore game suggestion refresh errors while typing.
+    });
+  }, GAME_SEARCH_DEBOUNCE_MS);
+
+  gameServiceInputEl.addEventListener('input', () => {
+    state.gameSelectedService = null;
+    debouncedGameServiceSearch();
+  });
+  gameServiceInputEl.addEventListener('change', () => {
+    refreshGameServiceSuggestions({ force: false }).catch(() => {
+      // Ignore game suggestion refresh errors on change.
+    });
+  });
+  gameServiceInputEl.addEventListener('focus', () => {
+    hideCategorySuggestions();
+    hideServiceSuggestions();
+    keepSuggestionInputVisible(gameServiceInputEl);
+    refreshGameServiceSuggestions({ force: false }).catch(() => {
+      // Ignore game suggestion refresh errors on focus.
+    });
+  });
+}
+
 if (categorySuggestPanelEl) {
+  categorySuggestPanelEl.addEventListener('mousedown', (event) => {
+    const handled = handleSuggestPanelClick(event, 'category');
+    if (handled) {
+      event.preventDefault();
+    }
+  });
+  categorySuggestPanelEl.addEventListener('touchstart', (event) => {
+    const handled = handleSuggestPanelClick(event, 'category');
+    if (handled) {
+      event.preventDefault();
+    }
+  }, { passive: false });
   categorySuggestPanelEl.addEventListener('click', (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    const optionEl = target.closest('[data-suggest-kind="category"]');
-    if (!optionEl) return;
-    const index = Number(optionEl.dataset.suggestIndex || -1);
-    if (!Number.isFinite(index) || index < 0) return;
-    applyCategorySuggestion(index);
+    handleSuggestPanelClick(event, 'category');
   });
 }
 
 if (serviceSuggestPanelEl) {
+  serviceSuggestPanelEl.addEventListener('mousedown', (event) => {
+    const handled = handleSuggestPanelClick(event, 'service');
+    if (handled) {
+      event.preventDefault();
+    }
+  });
+  serviceSuggestPanelEl.addEventListener('touchstart', (event) => {
+    const handled = handleSuggestPanelClick(event, 'service');
+    if (handled) {
+      event.preventDefault();
+    }
+  }, { passive: false });
   serviceSuggestPanelEl.addEventListener('click', (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    const optionEl = target.closest('[data-suggest-kind="service"]');
-    if (!optionEl) return;
-    const index = Number(optionEl.dataset.suggestIndex || -1);
-    if (!Number.isFinite(index) || index < 0) return;
-    applyServiceSuggestion(index);
+    handleSuggestPanelClick(event, 'service');
+  });
+}
+
+if (gameServiceSuggestPanelEl) {
+  gameServiceSuggestPanelEl.addEventListener('mousedown', (event) => {
+    const handled = handleSuggestPanelClick(event, 'game-service');
+    if (handled) {
+      event.preventDefault();
+    }
+  });
+  gameServiceSuggestPanelEl.addEventListener('touchstart', (event) => {
+    const handled = handleSuggestPanelClick(event, 'game-service');
+    if (handled) {
+      event.preventDefault();
+    }
+  }, { passive: false });
+  gameServiceSuggestPanelEl.addEventListener('click', (event) => {
+    handleSuggestPanelClick(event, 'game-service');
   });
 }
 
 if (typeof window !== 'undefined') {
   const refreshSuggestionPanelPosition = debounce(() => {
+    if (!hasOpenSuggestionPanel()) {
+      return;
+    }
     refreshOpenSuggestionPanelPosition();
-  }, 40);
+  }, IS_IOS_DEVICE ? 90 : 50);
 
   window.addEventListener('resize', refreshSuggestionPanelPosition, { passive: true });
   window.addEventListener('scroll', refreshSuggestionPanelPosition, { passive: true });
@@ -5777,6 +7426,75 @@ if (ordersBody) {
     if (!orderId) return;
 
     await checkOrderStatus(orderId);
+  });
+}
+
+if (gameHistoryStatusEl) {
+  gameHistoryStatusEl.addEventListener('change', () => {
+    state.gameHistoryFilter.status = gameHistoryStatusEl.value || 'ALL';
+    renderGameOrders();
+  });
+}
+
+if (gameHistoryIdSearchEl) {
+  const debouncedGameHistoryId = debounce(() => {
+    renderGameOrders();
+  }, 150);
+  gameHistoryIdSearchEl.addEventListener('input', () => {
+    state.gameHistoryFilter.idQuery = gameHistoryIdSearchEl.value || '';
+    debouncedGameHistoryId();
+  });
+}
+
+if (gameHistoryServiceSearchEl) {
+  const debouncedGameHistoryService = debounce(() => {
+    renderGameOrders();
+  }, 180);
+  gameHistoryServiceSearchEl.addEventListener('input', () => {
+    state.gameHistoryFilter.serviceQuery = gameHistoryServiceSearchEl.value || '';
+    debouncedGameHistoryService();
+  });
+}
+
+if (gameHistoryRefreshBtnEl) {
+  gameHistoryRefreshBtnEl.addEventListener('click', async () => {
+    showNotice(gameOrderNoticeBottomEl, 'info', 'Memuat ulang riwayat topup game...');
+    await Promise.all([
+      loadGameOrders({ force: true }),
+      loadGameAdminPendingOrders({ force: true }),
+    ]);
+    showNotice(gameOrderNoticeBottomEl, 'ok', 'Riwayat topup game berhasil diperbarui.');
+  });
+}
+
+if (gameOrdersBodyEl) {
+  gameOrdersBodyEl.addEventListener('click', async (event) => {
+    const statusBtn = event.target.closest('[data-game-action="status"]');
+    if (!statusBtn) return;
+    const orderId = Number(statusBtn.dataset.gameOrderId || 0);
+    if (!Number.isFinite(orderId) || orderId <= 0) return;
+    await checkGameOrderStatus(orderId);
+  });
+}
+
+if (gameAdminPendingBodyEl) {
+  gameAdminPendingBodyEl.addEventListener('click', async (event) => {
+    const actionBtn = event.target.closest('[data-game-admin-action]');
+    if (!actionBtn) return;
+
+    const action = String(actionBtn.dataset.gameAdminAction || '').trim().toLowerCase();
+    const orderId = Number(actionBtn.dataset.gameAdminOrder || 0);
+    if (!Number.isFinite(orderId) || orderId <= 0 || !['verify', 'cancel'].includes(action)) {
+      return;
+    }
+
+    const promptText = action === 'verify'
+      ? 'Catatan admin verifikasi (opsional):'
+      : 'Alasan pembatalan (opsional):';
+    const adminNote = window.prompt(promptText, '');
+    if (adminNote === null) return;
+
+    await verifyGamePaymentByAdmin(orderId, action, adminNote);
   });
 }
 
@@ -6030,6 +7748,8 @@ if (btnLogout) {
   await apiRequest('./api/auth_logout.php', { method: 'POST' });
   stopAdminPendingPoller();
   stopPendingPaymentSyncPoller();
+  stopCsChatPoller();
+  stopCsChatAdminPoller();
   if (serviceInfoRafId && typeof cancelAnimationFrame === 'function') {
     cancelAnimationFrame(serviceInfoRafId);
   }
@@ -6114,6 +7834,9 @@ if (btnLogout) {
     status: 'all',
     query: '',
   };
+  resetCsChatState();
+  state.adminCsChats = [];
+  state.adminCsChatsLoaded = false;
   state.history = {
     status: 'ALL',
     idQuery: '',
@@ -6135,6 +7858,22 @@ if (btnLogout) {
   state.serviceCatalogTotalPages = 1;
   state.serviceCatalogLoaded = false;
   state.serviceCatalogRequestId = 0;
+  state.gameServices = [];
+  state.gameServicesLoaded = false;
+  state.gameServicesRequestId = 0;
+  state.gameServiceSearchCache = new Map();
+  state.gameSelectedService = null;
+  state.gameOrders = [];
+  state.gameOrdersLoaded = false;
+  state.gameOrdersRequestId = 0;
+  state.gameAdminPendingOrders = [];
+  state.gameAdminPendingLoaded = false;
+  state.gameAdminPendingRequestId = 0;
+  state.gameHistoryFilter = {
+    status: 'ALL',
+    idQuery: '',
+    serviceQuery: '',
+  };
   state.panelHighlights = [];
   state.panelHighlightsLoaded = false;
   state.panelInfoMeta = {
@@ -6158,22 +7897,35 @@ if (btnLogout) {
   if (ticketMessageEl) ticketMessageEl.value = '';
   if (ticketPriorityEl) ticketPriorityEl.value = 'normal';
   if (ticketCategoryEl) ticketCategoryEl.value = 'Laporan Order';
+  if (gameCategorySelectEl) gameCategorySelectEl.value = '';
+  if (gameServiceInputEl) gameServiceInputEl.value = '';
+  if (gameTargetInputEl) gameTargetInputEl.value = '';
+  if (gameContactInputEl) gameContactInputEl.value = '';
+  if (gameHistoryStatusEl) gameHistoryStatusEl.value = 'ALL';
+  if (gameHistoryIdSearchEl) gameHistoryIdSearchEl.value = '';
+  if (gameHistoryServiceSearchEl) gameHistoryServiceSearchEl.value = '';
   closePaymentQrModal();
   closeNewsModal();
   closeAccountMenu();
   hideAllSuggestions(true);
   resetNewsForm();
   clearTicketDetail();
-  state.currentView = 'dashboard';
-  updateUrlForView('dashboard');
+  setCsChatPanelOpen(false);
+  if (csChatInputEl) csChatInputEl.value = '';
+  state.currentView = 'utama';
+  updateUrlForView('utama');
   hideCheckoutPanel();
   renderTop5Services();
   renderRefills();
   renderServicesCatalog();
+  renderGameOrders();
+  renderGameAdminPendingOrders();
   renderDashboardHighlights();
   renderTickets();
   renderAdminPaymentOrders();
   renderAdminOrderHistory();
+  renderCsChat();
+  renderAdminCsChats();
   renderNews();
   renderAdminNews();
   renderPanelInfoTicker();
@@ -6228,15 +7980,20 @@ hideLogoIfMissing('sideLogo');
   renderTop5Services();
   renderRefills();
   renderServicesCatalog();
+  renderGameOrders();
+  renderGameAdminPendingOrders();
   renderDashboardHighlights();
   renderTickets();
   renderAdminPaymentOrders();
   renderAdminOrderHistory();
+  renderCsChat();
+  renderAdminCsChats();
   renderNews();
   renderAdminNews();
   renderPanelInfoTicker();
   updateShareSectionState();
   updateAdminMenuLabel();
+  updateCsChatWidgetVisibility();
   restorePanelInfoState();
   updateAccountMenu();
   updateProfilePanel();
@@ -6247,7 +8004,7 @@ hideLogoIfMissing('sideLogo');
       softFail: false,
     });
     if (loggedIn) {
-      const initialView = normalizePanelView(pageEl?.dataset?.initialView || '');
+      const initialView = normalizePanelView(pageEl?.dataset?.initialView || 'utama');
       applyPanelView(initialView);
       updateUrlForView(initialView);
       await ensureViewData(initialView, { force: false });

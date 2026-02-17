@@ -44,7 +44,7 @@ final class Config
 
     private static function ensureSections(array $config): array
     {
-        $sections = ['app', 'db', 'provider', 'pricing', 'checkout', 'payment', 'payment_gateway', 'news', 'notifications'];
+        $sections = ['app', 'db', 'provider', 'pricing', 'game_provider', 'game_pricing', 'checkout', 'payment', 'payment_gateway', 'news', 'notifications'];
         foreach ($sections as $section) {
             if (!isset($config[$section]) || !is_array($config[$section])) {
                 $config[$section] = [];
@@ -63,6 +63,8 @@ final class Config
         $db = (array)$config['db'];
         $provider = (array)$config['provider'];
         $pricing = (array)$config['pricing'];
+        $gameProvider = (array)$config['game_provider'];
+        $gamePricing = (array)$config['game_pricing'];
         $checkout = (array)$config['checkout'];
         $payment = (array)$config['payment'];
         $paymentGateway = (array)$config['payment_gateway'];
@@ -106,6 +108,27 @@ final class Config
         $db['username'] = self::env('DB_USERNAME', (string)($db['username'] ?? 'root'));
         $db['password'] = self::env('DB_PASSWORD', (string)($db['password'] ?? ''));
         $db['charset'] = self::env('DB_CHARSET', (string)($db['charset'] ?? 'utf8mb4'));
+        $db['connect_timeout'] = self::envInt('DB_CONNECT_TIMEOUT', (int)($db['connect_timeout'] ?? 8));
+        $db['auto_create_database'] = self::envBool(
+            'DB_AUTO_CREATE_DATABASE',
+            (bool)($db['auto_create_database'] ?? true)
+        );
+        $db['host_fallbacks'] = self::envBool('DB_HOST_FALLBACKS', (bool)($db['host_fallbacks'] ?? false));
+        $dbHostFallbackListRaw = self::env('DB_HOST_FALLBACK_LIST', '');
+        if ($dbHostFallbackListRaw !== '') {
+            $fallbacks = preg_split('/[\s,;]+/', $dbHostFallbackListRaw) ?: [];
+            $normalizedFallbacks = [];
+            foreach ($fallbacks as $candidate) {
+                $candidate = trim((string)$candidate);
+                if ($candidate === '') {
+                    continue;
+                }
+                $normalizedFallbacks[$candidate] = true;
+            }
+            if ($normalizedFallbacks !== []) {
+                $db['host_fallback_list'] = array_keys($normalizedFallbacks);
+            }
+        }
         $db['ssl_mode'] = mb_strtoupper(self::env('DB_SSL_MODE', (string)($db['ssl_mode'] ?? 'DISABLED')));
         $db['ssl_ca'] = self::env('DB_SSL_CA', (string)($db['ssl_ca'] ?? ''));
         $db['ssl_ca_base64'] = self::env('DB_SSL_CA_BASE64', (string)($db['ssl_ca_base64'] ?? ''));
@@ -165,6 +188,50 @@ final class Config
             $categoryMarkup = json_decode($categoryMarkupRaw, true);
             if (is_array($categoryMarkup)) {
                 $pricing['category_markup_percent'] = $categoryMarkup;
+            }
+        }
+
+        $gameProvider['api_url'] = self::env(
+            'GAME_PROVIDER_API_URL',
+            (string)($gameProvider['api_url'] ?? 'https://api.mengtopup.id')
+        );
+        $gameProvider['api_key'] = self::env(
+            'GAME_PROVIDER_API_KEY',
+            (string)($gameProvider['api_key'] ?? '')
+        );
+        $gameProvider['timeout'] = self::envInt(
+            'GAME_PROVIDER_TIMEOUT',
+            (int)($gameProvider['timeout'] ?? 20)
+        );
+        $gameProvider['services_cache_ttl'] = self::envInt(
+            'GAME_PROVIDER_SERVICES_CACHE_TTL',
+            (int)($gameProvider['services_cache_ttl'] ?? 600)
+        );
+        $gameProvider['cache_dir'] = self::env(
+            'GAME_PROVIDER_CACHE_DIR',
+            (string)($gameProvider['cache_dir'] ?? '')
+        );
+        if ($gameProvider['cache_dir'] === '' && $isVercel) {
+            $gameProvider['cache_dir'] = $tmpRoot . DIRECTORY_SEPARATOR . 'game-provider';
+        }
+
+        $gamePricing['default_markup_percent'] = self::envFloat(
+            'GAME_PRICING_DEFAULT_MARKUP_PERCENT',
+            (float)($gamePricing['default_markup_percent'] ?? 25)
+        );
+        $gamePricing['fixed_markup'] = self::envInt(
+            'GAME_PRICING_FIXED_MARKUP',
+            (int)($gamePricing['fixed_markup'] ?? 0)
+        );
+        $gamePricing['round_to'] = self::envInt(
+            'GAME_PRICING_ROUND_TO',
+            (int)($gamePricing['round_to'] ?? 100)
+        );
+        $gameCategoryMarkupRaw = self::env('GAME_PRICING_CATEGORY_MARKUP_JSON', '');
+        if ($gameCategoryMarkupRaw !== '') {
+            $gameCategoryMarkup = json_decode($gameCategoryMarkupRaw, true);
+            if (is_array($gameCategoryMarkup)) {
+                $gamePricing['category_markup_percent'] = $gameCategoryMarkup;
             }
         }
 
@@ -340,6 +407,8 @@ final class Config
         $config['db'] = $db;
         $config['provider'] = $provider;
         $config['pricing'] = $pricing;
+        $config['game_provider'] = $gameProvider;
+        $config['game_pricing'] = $gamePricing;
         $config['checkout'] = $checkout;
         $config['payment'] = $payment;
         $config['payment_gateway'] = $paymentGateway;

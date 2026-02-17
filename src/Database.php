@@ -15,6 +15,8 @@ final class Database
         $username = (string)($config['username'] ?? 'root');
         $password = (string)($config['password'] ?? '');
         $charset = (string)($config['charset'] ?? 'utf8mb4');
+        $connectTimeout = max(2, min(20, (int)($config['connect_timeout'] ?? 8)));
+        $autoCreateDatabase = (bool)($config['auto_create_database'] ?? true);
 
         if ($dbName === '') {
             throw new RuntimeException('Konfigurasi database belum lengkap (nama database kosong).');
@@ -24,6 +26,7 @@ final class Database
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             PDO::ATTR_EMULATE_PREPARES => false,
+            PDO::ATTR_TIMEOUT => $connectTimeout,
         ];
 
         $sslMode = strtoupper(trim((string)($config['ssl_mode'] ?? 'DISABLED')));
@@ -31,13 +34,40 @@ final class Database
             self::applySslOptions($pdoOptions, $config);
         }
 
-        $hosts = self::buildHostCandidates($host);
+        $hosts = self::buildHostCandidates($host, $config);
         $lastException = null;
         foreach ($hosts as $candidateHost) {
             $dsn = sprintf('mysql:host=%s;port=%d;dbname=%s;charset=%s', $candidateHost, $port, $dbName, $charset);
             try {
                 return new PDO($dsn, $username, $password, $pdoOptions);
             } catch (Throwable $e) {
+                if (
+                    $autoCreateDatabase
+                    && self::isUnknownDatabaseException($e)
+                    && self::isSafeDatabaseIdentifier($dbName)
+                ) {
+                    try {
+                        self::createDatabaseIfMissing(
+                            $candidateHost,
+                            $port,
+                            $dbName,
+                            $charset,
+                            $username,
+                            $password,
+                            $pdoOptions
+                        );
+                        return new PDO($dsn, $username, $password, $pdoOptions);
+                    } catch (Throwable $createException) {
+                        $lastException = $createException;
+                        error_log(sprintf(
+                            'DB create-if-missing failed for host "%s": %s',
+                            $candidateHost,
+                            $createException->getMessage()
+                        ));
+                        continue;
+                    }
+                }
+
                 $lastException = $e;
                 error_log(sprintf('DB connect failed for host "%s": %s', $candidateHost, $e->getMessage()));
             }
@@ -50,7 +80,7 @@ final class Database
         throw new RuntimeException('Koneksi database gagal.');
     }
 
-    private static function buildHostCandidates(string $host): array
+    private static function buildHostCandidates(string $host, array $config = []): array
     {
         $host = trim($host);
         if ($host === '') {
@@ -58,11 +88,24 @@ final class Database
         }
 
         $candidates = [$host];
-        if (preg_match('/^sql(\d+)\.infinityfree\.com$/i', $host, $matches)) {
-            $sqlNode = (string)($matches[1] ?? '');
-            if ($sqlNode !== '') {
-                $candidates[] = sprintf('sql%s.epizy.com', $sqlNode);
-                $candidates[] = sprintf('sql%s.byetcluster.com', $sqlNode);
+        $useFallbacks = (bool)($config['host_fallbacks'] ?? false);
+        if ($useFallbacks) {
+            $manualFallbacks = $config['host_fallback_list'] ?? [];
+            if (is_array($manualFallbacks)) {
+                foreach ($manualFallbacks as $candidate) {
+                    $candidate = trim((string)$candidate);
+                    if ($candidate !== '') {
+                        $candidates[] = $candidate;
+                    }
+                }
+            }
+
+            if (preg_match('/^sql(\d+)\.infinityfree\.com$/i', $host, $matches)) {
+                $sqlNode = (string)($matches[1] ?? '');
+                if ($sqlNode !== '') {
+                    $candidates[] = sprintf('sql%s.epizy.com', $sqlNode);
+                    $candidates[] = sprintf('sql%s.byetcluster.com', $sqlNode);
+                }
             }
         }
 
@@ -76,6 +119,62 @@ final class Database
         }
 
         return array_values($normalized);
+    }
+
+    private static function isUnknownDatabaseException(Throwable $e): bool
+    {
+        $message = mb_strtolower(trim((string)$e->getMessage()));
+        return str_contains($message, 'unknown database') || str_contains($message, '1049');
+    }
+
+    private static function isSafeDatabaseIdentifier(string $dbName): bool
+    {
+        return preg_match('/^[A-Za-z0-9_]+$/', trim($dbName)) === 1;
+    }
+
+    private static function createDatabaseIfMissing(
+        string $host,
+        int $port,
+        string $dbName,
+        string $charset,
+        string $username,
+        string $password,
+        array $pdoOptions
+    ): void {
+        $safeCharset = self::sanitizeCharset($charset);
+        $collation = self::defaultCollationForCharset($safeCharset);
+
+        $serverDsn = sprintf('mysql:host=%s;port=%d;charset=%s', $host, $port, $safeCharset);
+        $serverPdo = new PDO($serverDsn, $username, $password, $pdoOptions);
+
+        $quotedDbName = '`' . str_replace('`', '``', $dbName) . '`';
+        $sql = sprintf(
+            'CREATE DATABASE IF NOT EXISTS %s CHARACTER SET %s COLLATE %s',
+            $quotedDbName,
+            $safeCharset,
+            $collation
+        );
+        $serverPdo->exec($sql);
+    }
+
+    private static function sanitizeCharset(string $charset): string
+    {
+        $charset = trim($charset);
+        if (preg_match('/^[A-Za-z0-9_]+$/', $charset) !== 1) {
+            return 'utf8mb4';
+        }
+
+        return mb_strtolower($charset);
+    }
+
+    private static function defaultCollationForCharset(string $charset): string
+    {
+        return match ($charset) {
+            'utf8mb4' => 'utf8mb4_unicode_ci',
+            'utf8' => 'utf8_unicode_ci',
+            'latin1' => 'latin1_swedish_ci',
+            default => $charset . '_general_ci',
+        };
     }
 
     public static function ensureSchema(PDO $pdo): void
@@ -96,7 +195,7 @@ final class Database
 
     private static function ensureBaseTables(PDO $pdo): void
     {
-        $coreTables = ['users', 'orders', 'order_refills', 'balance_transactions', 'deposit_requests', 'news_posts', 'tickets', 'ticket_messages'];
+        $coreTables = ['users', 'orders', 'game_orders', 'order_refills', 'balance_transactions', 'deposit_requests', 'news_posts', 'tickets', 'ticket_messages'];
         $allExists = true;
         foreach ($coreTables as $table) {
             if (!self::tableExists($pdo, $table)) {

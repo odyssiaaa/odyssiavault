@@ -429,6 +429,7 @@ try {
             'msg' => $gatewayPayment !== null
                 ? 'Checkout berhasil. Lanjutkan pembayaran via Pakasir QRIS.'
                 : 'Checkout berhasil. Silakan lakukan pembayaran dan konfirmasi agar admin memproses order.',
+            'order_type' => 'ssm',
             'order_id' => $localOrderId,
             'service' => [
                 'id' => $serviceId,

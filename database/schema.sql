@@ -57,6 +57,46 @@ CREATE TABLE IF NOT EXISTS orders (
     INDEX idx_orders_user_status_created (user_id, status, created_at)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS game_orders (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NOT NULL,
+    provider_order_id VARCHAR(120) NULL,
+    external_id VARCHAR(120) NOT NULL UNIQUE,
+    service_code VARCHAR(80) NOT NULL,
+    service_name VARCHAR(255) NOT NULL,
+    category VARCHAR(120) NOT NULL,
+    target VARCHAR(120) NOT NULL,
+    contact VARCHAR(40) NOT NULL,
+    quantity INT UNSIGNED NOT NULL DEFAULT 1,
+    unit_buy_price BIGINT UNSIGNED NOT NULL,
+    unit_sell_price BIGINT UNSIGNED NOT NULL,
+    total_buy_price BIGINT UNSIGNED NOT NULL,
+    total_sell_price BIGINT UNSIGNED NOT NULL,
+    profit BIGINT UNSIGNED NOT NULL,
+    status VARCHAR(40) NOT NULL DEFAULT 'Menunggu Pembayaran',
+    payment_deadline_at DATETIME NULL,
+    payment_confirmed_at DATETIME NULL,
+    payment_confirmed_by_admin_at DATETIME NULL,
+    payment_method VARCHAR(30) NULL,
+    payment_channel_name VARCHAR(120) NULL,
+    payment_account_name VARCHAR(120) NULL,
+    payment_account_number VARCHAR(80) NULL,
+    payment_payer_name VARCHAR(120) NULL,
+    payment_reference VARCHAR(120) NULL,
+    payment_note TEXT NULL,
+    provider_status VARCHAR(80) NULL,
+    provider_sn TEXT NULL,
+    provider_response_json LONGTEXT NULL,
+    error_message TEXT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT fk_game_orders_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_game_orders_user_created (user_id, created_at),
+    INDEX idx_game_orders_status_created (status, created_at),
+    INDEX idx_game_orders_status_deadline_confirm (status, payment_deadline_at, payment_confirmed_at),
+    INDEX idx_game_orders_provider_order (provider_order_id)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS order_refills (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     order_id BIGINT UNSIGNED NOT NULL,

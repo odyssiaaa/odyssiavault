@@ -41,7 +41,7 @@ if ($message === '' || mb_strlen($message) < 2) {
 }
 
 try {
-    $ticketStmt = $pdo->prepare('SELECT id, user_id, status FROM tickets WHERE id = :id LIMIT 1');
+    $ticketStmt = $pdo->prepare('SELECT id, user_id, category, status FROM tickets WHERE id = :id LIMIT 1');
     $ticketStmt->execute(['id' => $ticketId]);
     $ticket = $ticketStmt->fetch();
 } catch (Throwable $e) {
@@ -84,6 +84,12 @@ if ($senderRole === 'user') {
     $nextStatus = 'open';
 }
 
+$currentCategory = (string)($ticket['category'] ?? '');
+$nextCategory = $currentCategory;
+if ($senderRole === 'admin' && isCsChatCategory($currentCategory)) {
+    $nextCategory = csChatCategoryAdmin();
+}
+
 try {
     $pdo->beginTransaction();
 
@@ -101,11 +107,12 @@ try {
 
     $updateStmt = $pdo->prepare(
         'UPDATE tickets
-         SET status = :status, last_message_at = :last_message_at, updated_at = :updated_at
+         SET status = :status, category = :category, last_message_at = :last_message_at, updated_at = :updated_at
          WHERE id = :id'
     );
     $updateStmt->execute([
         'status' => $nextStatus,
+        'category' => $nextCategory,
         'last_message_at' => $now,
         'updated_at' => $now,
         'id' => $ticketId,
